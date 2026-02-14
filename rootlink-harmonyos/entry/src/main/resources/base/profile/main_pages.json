@@ -1,0 +1,14 @@
+{
+  "src": [
+    "pages/Splash",
+    "pages/Login",
+    "pages/Register",
+    "pages/Index",
+    "pages/Dashboard",
+    "pages/Relations",
+    "pages/FamilyTree",
+    "pages/Testament",
+    "pages/Profile",
+    "pages/EulogyWall"
+  ]
+}

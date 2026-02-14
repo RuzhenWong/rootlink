@@ -1,0 +1,7 @@
+{
+  "string": [
+    { "name": "module_desc",           "value": "RootLink 家族根链" },
+    { "name": "EntryAbility_desc",     "value": "RootLink 家族关系管理" },
+    { "name": "EntryAbility_label",    "value": "RootLink" }
+  ]
+}

@@ -1,0 +1,60 @@
+# =============================================================
+# RootLink NebulaGraph 图空间初始化脚本
+# 连接方式：nebula-console -addr 127.0.0.1 -port 9669 -u root -p nebula
+# 执行：source /path/to/init-nebula.nGQL
+# =============================================================
+
+# 1. 创建图空间
+CREATE SPACE IF NOT EXISTS rootlink_family(
+    partition_num  = 1,
+    replica_factor = 1,
+    vid_type       = INT64
+);
+
+# 等待图空间生效
+:sleep 3
+
+USE rootlink_family;
+
+# 2. 创建顶点 TAG
+# Person：家族成员节点
+CREATE TAG IF NOT EXISTS Person(
+    name        string,   -- 真实姓名
+    gender      int,      -- 0=未知 1=男 2=女
+    life_status int       -- 0=活跃 1=不活跃 2=疑似离世 3=已离世
+);
+
+# 3. 创建边 EDGE
+# 父母 → 子女（有方向：箭头从父/母指向子/女）
+CREATE EDGE IF NOT EXISTS PARENT_OF(
+    parent_gender int,    -- 父的性别：1=男(爸) 2=女(妈)
+    child_gender  int     -- 子的性别：1=男(子) 2=女(女)
+);
+
+# 配偶关系（双向：A→B 和 B→A 各一条）
+CREATE EDGE IF NOT EXISTS SPOUSE_OF();
+
+# 兄弟姐妹关系（双向：A→B 和 B→A 各一条）
+CREATE EDGE IF NOT EXISTS SIBLING_OF();
+
+:sleep 2
+
+# 4. 建索引（加速查询）
+CREATE TAG INDEX IF NOT EXISTS idx_person_name ON Person(name(50));
+
+:sleep 2
+
+# 5. 验证 Schema
+SHOW TAGS;
+SHOW EDGES;
+
+# =============================================================
+# 说明：
+#  - 启动后端后，@PostConstruct 会自动幂等建 Schema，
+#    本脚本用于手动初始化或查验结构。
+#  - 边方向约定：
+#      PARENT_OF: 父/母 ──→ 子/女
+#      SPOUSE_OF: A ──→ B  且  B ──→ A（双向各一条）
+#      SIBLING_OF: 同上双向
+#  - VID 与 MySQL user.id 保持一致，直接用 Long 主键
+# =============================================================

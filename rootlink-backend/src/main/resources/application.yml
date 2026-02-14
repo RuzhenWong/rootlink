@@ -1,0 +1,129 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+
+spring:
+  application:
+    name: rootlink-backend
+
+  # 数据源配置
+
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 10MB
+
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/rootlink?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: rootlink
+    password: 19930212MAOyue
+    
+    druid:
+      initial-size: 5
+      min-idle: 5
+      max-active: 20
+      max-wait: 60000
+      test-while-idle: true
+      test-on-borrow: false
+      test-on-return: false
+      validation-query: SELECT 1
+      time-between-eviction-runs-millis: 60000
+      min-evictable-idle-time-millis: 300000
+
+  # Redis配置
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: 
+      database: 0
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 8
+          min-idle: 0
+          max-wait: -1ms
+      timeout: 3000ms
+
+# MyBatis Plus配置
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    map-underscore-to-camel-case: true
+  mapper-locations: classpath*:mapper/**/*.xml
+  type-aliases-package: com.rootlink.backend.entity
+  global-config:
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+      id-type: auto
+
+# JWT配置
+jwt:
+  secret: RootLink@2026!SecretKey#Ultimate-Change-This-In-Production
+  expire-time: 86400000  # 24小时(毫秒)
+  refresh-expire-time: 604800000  # 7天(毫秒)
+
+# 安全配置
+security:
+  aes:
+    # 注意: 生产环境必须修改此密钥,且长度必须是16/24/32字节
+    key: RootLinkAES256!!  # 16字节密钥,仅用于开发环境
+
+# NebulaGraph配置
+nebula:
+  graph:
+    hosts: 127.0.0.1:9669      # NebulaGraph地址，多个用逗号分隔：127.0.0.1:9669,127.0.0.1:9670
+    username: root
+    password: nebula
+    space: rootlink_family     # 图空间名称
+  pool:
+    max-conn-size: 10          # 最大连接数
+    min-conn-size: 1           # 最小连接数
+    idle-time: 0               # 连接空闲超时(ms)，0表示不超时
+    interval-idle: -1
+    wait-time: 0
+  # 是否启用NebulaGraph（true=使用图推断，false=降级到Java链式推断）
+  # 启用前请先确保 Nebula 服务已启动，首次启动会自动建 Schema
+  enabled: true
+
+# XXL-JOB定时任务配置
+xxl:
+  job:
+    admin:
+      addresses: http://127.0.0.1:8080/xxl-job-admin  # 调度中心地址
+    accessToken: default_token
+    executor:
+      appname: rootlink-executor
+      address:
+      ip:
+      port: 9999
+      logpath: /data/applogs/xxl-job/jobhandler
+      logretentiondays: 30
+
+# 日志配置
+logging:
+  level:
+    com.rootlink.backend: debug
+    com.baomidou.mybatisplus: debug
+  pattern:
+    console: '%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{50} - %msg%n'
+
+
+# 文件上传路径
+app:
+  upload:
+    avatar-dir: uploads/avatars/
+    avatar-base-url: /uploads/avatars/
+
+# 腾讯云 COS
+cos:
+  secret-id: **** # 按实际 secret-id 填写
+  secret-key: **** # 按实际 secret-key 填写
+  bucket: **** # 按实际 bucket 所在地域修改
+  region: ap-guangzhou      # 按实际 bucket 所在地域修改
+  base-url: **** # 据实填写
