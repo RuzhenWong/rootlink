@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -62,6 +63,15 @@ public class RelationController {
         return Result.success(relationService.getMyRelations(userId));
     }
 
+    /**
+     * 家族关系树全网数据：返回所有可达节点和它们之间的全部关系边
+     * 前端用此替代硬编码规则来绘制连线
+     */
+    @GetMapping("/network")
+    public Result<Map<String, Object>> getRelationNetwork(@RequestAttribute("userId") Long userId) {
+        return Result.success(relationService.getRelationNetwork(userId));
+    }
+
     /** 推断待确认的关系 */
     @GetMapping("/inferred-pending")
     public Result<List<Map<String, Object>>> getPendingInferred(@RequestAttribute("userId") Long userId) {
@@ -89,5 +99,33 @@ public class RelationController {
             @PathVariable Long relationId) {
         relationService.removeRelation(userId, relationId);
         return Result.success();
+    }
+
+    /**
+     * 全量重推：以当前用户为起点，BFS 遍历整个亲属网络，
+     * 清除旧推断、重建 Nebula 边（修正性别属性）、重新全量推断。
+     * 任务异步执行，接口立即返回 taskId（jobId=userId+timestamp）。
+     * 前端可通过 /v1/relation/reinfer/status?jobId=xxx 轮询进度。
+     */
+    @PostMapping("/reinfer/full")
+    public Result<Map<String, Object>> fullReInfer(@RequestAttribute("userId") Long userId) {
+        String jobId = userId + "_" + System.currentTimeMillis();
+        relationService.fullReInfer(userId, jobId);
+        Map<String, Object> resp = new HashMap<>();
+        resp.put("jobId", jobId);
+        resp.put("message", "重新推断任务已启动，正在后台处理...");
+        return Result.success(resp);
+    }
+
+    /**
+     * 查询全量重推进度
+     * 返回：{ jobId, status: "running"|"done"|"error", progress, message, result }
+     */
+    @GetMapping("/reinfer/status")
+    public Result<Map<String, Object>> getReInferStatus(
+            @RequestAttribute("userId") Long userId,
+            @RequestParam String jobId) {
+        Map<String, Object> status = relationService.getReInferStatus(userId, jobId);
+        return Result.success(status);
     }
 }

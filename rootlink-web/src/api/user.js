@@ -18,4 +18,6 @@ export const userApi = {
 
   submitRealName(data) { return request.post('/v1/user/realname/submit', data) },
   getRealNameStatus()  { return request.get('/v1/user/realname/status') },
+  getMyIdCard()        { return request.get('/v1/user/realname/idcard') },
+  deactivateAccount()  { return request.delete('/v1/user/deactivate') },
 }

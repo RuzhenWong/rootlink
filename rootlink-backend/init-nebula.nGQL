@@ -5,11 +5,7 @@
 # =============================================================
 
 # 1. 创建图空间
-CREATE SPACE IF NOT EXISTS rootlink_family(
-    partition_num  = 1,
-    replica_factor = 1,
-    vid_type       = INT64
-);
+CREATE SPACE IF NOT EXISTS rootlink_family( partition_num  = 1, replica_factor = 1, vid_type = INT64);
 
 # 等待图空间生效
 :sleep 3
@@ -18,18 +14,11 @@ USE rootlink_family;
 
 # 2. 创建顶点 TAG
 # Person：家族成员节点
-CREATE TAG IF NOT EXISTS Person(
-    name        string,   -- 真实姓名
-    gender      int,      -- 0=未知 1=男 2=女
-    life_status int       -- 0=活跃 1=不活跃 2=疑似离世 3=已离世
-);
+CREATE TAG IF NOT EXISTS Person( name        string, gender      int, life_status int );
 
 # 3. 创建边 EDGE
 # 父母 → 子女（有方向：箭头从父/母指向子/女）
-CREATE EDGE IF NOT EXISTS PARENT_OF(
-    parent_gender int,    -- 父的性别：1=男(爸) 2=女(妈)
-    child_gender  int     -- 子的性别：1=男(子) 2=女(女)
-);
+CREATE EDGE IF NOT EXISTS PARENT_OF( parent_gender int, child_gender  int);
 
 # 配偶关系（双向：A→B 和 B→A 各一条）
 CREATE EDGE IF NOT EXISTS SPOUSE_OF();

@@ -10,4 +10,9 @@ export const relationApi = {
   confirmInferred(id) { return request.post(`/v1/relation/inferred/${id}/confirm`) },
   rejectInferred(id) { return request.delete(`/v1/relation/inferred/${id}`) },
   removeRelation(relationId) { return request.delete(`/v1/relation/${relationId}`) },
+  // 全量重推
+  startFullReInfer() { return request.post('/v1/relation/reinfer/full') },
+  getReInferStatus(jobId) { return request.get('/v1/relation/reinfer/status', { jobId }) },
+  // 家族关系网络（全节点+全边，用于关系树绘图）
+  getRelationNetwork() { return request.get('/v1/relation/network') },
 }

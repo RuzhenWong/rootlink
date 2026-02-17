@@ -9,12 +9,71 @@
               <el-radio-button value="tree">关系图</el-radio-button>
               <el-radio-button value="list">列表</el-radio-button>
             </el-radio-group>
-            <el-button text @click="loadData">
-              <el-icon><Refresh /></el-icon>
-            </el-button>
+            <el-tooltip content="刷新显示" placement="top">
+              <el-button text :loading="loading" @click="loadData" style="margin-right:2px">
+                <el-icon><Refresh /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip placement="top" :disabled="reInferRunning">
+              <template #content>
+                <div style="max-width:220px;line-height:1.6">
+                  重新分析整个家族网络的关系称谓<br>
+                  修正性别错误（如母子被推断成父子）<br>
+                  自动补全缺失的推断关系
+                </div>
+              </template>
+              <el-button
+                type="primary" size="small"
+                :loading="reInferRunning"
+                :disabled="reInferRunning"
+                @click="startReInfer"
+                style="border-radius:8px"
+              >
+                <el-icon v-if="!reInferRunning" style="margin-right:4px"><MagicStick /></el-icon>
+                {{ reInferRunning ? '推断中...' : '重新推断' }}
+              </el-button>
+            </el-tooltip>
           </div>
         </div>
       </template>
+
+      <!-- 全量重推进度条（内嵌卡片顶部） -->
+      <transition name="slide-down">
+        <div v-if="reInferRunning || reInferDone" class="reinfer-bar">
+          <div class="reinfer-bar-inner">
+            <div class="reinfer-icon" :class="reInferStatus.status">
+              <el-icon v-if="reInferStatus.status === 'running'" class="is-loading"><Loading /></el-icon>
+              <el-icon v-else-if="reInferStatus.status === 'done'"><CircleCheck /></el-icon>
+              <el-icon v-else-if="reInferStatus.status === 'error'"><CircleClose /></el-icon>
+            </div>
+            <div class="reinfer-info">
+              <div class="reinfer-msg">{{ reInferStatus.message || '正在处理...' }}</div>
+              <el-progress
+                v-if="reInferStatus.status === 'running'"
+                :percentage="reInferStatus.progress || 0"
+                :stroke-width="4"
+                :show-text="false"
+                style="margin-top:4px"
+              />
+              <div v-if="reInferStatus.status === 'done' && reInferStatus.result" class="reinfer-result">
+                👥 {{ reInferStatus.result.networkSize }} 位成员 &nbsp;
+                🔗 {{ reInferStatus.result.manualEdges }} 条原始关系 &nbsp;
+                ✨ 新推断 {{ reInferStatus.result.newInferred }} 条
+              </div>
+            </div>
+            <div class="reinfer-actions">
+              <el-button
+                v-if="reInferStatus.status === 'done'"
+                type="primary" size="small" text
+                @click="loadData(); reInferDone = false"
+              >刷新树</el-button>
+              <el-button size="small" text @click="dismissReInfer">
+                <el-icon><Close /></el-icon>
+              </el-button>
+            </div>
+          </div>
+        </div>
+      </transition>
 
       <div v-if="loading" v-loading="true" style="height:400px" />
 
@@ -182,16 +241,18 @@
         </div>
       </template>
     </el-card>
+
+    <!-- 亲属详情抽屉 -->
+    <RelativeProfileDrawer v-model="profileDrawerVisible"
+      :userId="profileTargetId" :relationDesc="profileRelationDesc" />
   </div>
-  <!-- 亲属详情抽屉 -->
-  <RelativeProfileDrawer v-model="profileDrawerVisible"
-    :userId="profileTargetId" :relationDesc="profileRelationDesc" />
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, MagicStick, Loading, CircleCheck, CircleClose, Close } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import { relationApi } from '@/api/relation'
 import { useAuthStore } from '@/stores/auth'
 import RelativeProfileDrawer from '@/components/RelativeProfileDrawer.vue'
@@ -200,6 +261,7 @@ const router = useRouter()
 const authStore = useAuthStore()
 const loading = ref(false)
 const directRelations = ref([])  // getMyRelations 返回的原始数据
+const networkData     = ref({ nodes: [], edges: [] })  // 全网关系数据
 const viewMode = ref('tree')
 const selectedId = ref(null)
 const svgWrap = ref(null)
@@ -408,112 +470,79 @@ function curvePath(from, to) {
 }
 
 const edges = computed(() => {
-  const result = []
-  const me = layoutNodes.value.find(n => n.isMe)
-  if (!me) return []
+  const result     = []
+  const seenPairs  = new Set()
+  const myActualId = authStore.userInfo?.id   // 当前登录用户的真实 userId
 
-  // ——— 辅助：节点按关系分类 ———
-  const parents  = layoutNodes.value.filter(n => !n.isMe && isParentDesc(n.sublabel))
-  const siblings = layoutNodes.value.filter(n => !n.isMe && isSiblingDesc(n.sublabel))
-  const spouses  = layoutNodes.value.filter(n => !n.isMe && isSpouseDesc(n.sublabel))
-  const children = layoutNodes.value.filter(n => !n.isMe && isChildDesc(n.sublabel))
+  // 找 layout 节点（处理 'me' 特殊 id）
+  function findNode(userId) {
+    const uid = String(userId)
+    const me  = layoutNodes.value.find(n => n.isMe)
+    if (me && String(myActualId) === uid) return me
+    return layoutNodes.value.find(n => String(n.id) === uid) || null
+  }
 
-  function addEdge(from, to, label, type = 'inferred', dash = '5 3') {
+  // 判断连线类型
+  function edgeType(desc, inferStatus) {
+    if (!desc) return 'inferred'
+    if (isSpouseDesc(desc))  return 'spouse'
+    if (isSiblingDesc(desc)) return 'sibling'
+    // 直系血亲（含祖孙、曾祖等）+ 人工确认（inferStatus=0）均视为 direct 实线
+    if (inferStatus === 0)   return 'direct'
+    return 'inferred'
+  }
+
+  function addEdge(from, to, label, type, dash) {
     if (!from || !to) return
     const meta = edgeMeta(from, to)
     const colorMap = {
-      direct:  EDGE_COLORS.direct,
-      spouse:  EDGE_COLORS.spouse,
-      sibling: EDGE_COLORS.sibling,
+      direct:   EDGE_COLORS.direct,
+      spouse:   EDGE_COLORS.spouse,
+      sibling:  EDGE_COLORS.sibling,
       inferred: EDGE_COLORS.inferred,
     }
     result.push({
-      d: curvePath(from, to),
+      d:     curvePath(from, to),
       color: colorMap[type] || EDGE_COLORS.inferred,
-      width: type === 'direct' || type === 'spouse' ? 2.0 : 1.4,
-      dash:  type === 'direct' || type === 'spouse' ? 'none' : dash,
+      width: (type === 'direct' || type === 'spouse') ? 2.0 : 1.4,
+      dash,
       label,
-      mx: meta.mx,
-      my: meta.my,
-      angle: meta.angle,
-      fromId: from.id,
-      toId: to.id,
+      mx: meta.mx, my: meta.my, angle: meta.angle,
+      fromId: from.id, toId: to.id,
       key: `${from.id}-${to.id}`,
     })
   }
 
-  // ===== 1. 我 ↔ 父母（母子/父子）=====
-  parents.forEach(p => {
-    const label = p.sublabel === '母亲' ? '母子' : '父子'
-    addEdge(me, p, label, 'direct', 'none')
-  })
+  // ── 数据驱动：遍历后端返回的全网关系边 ──────────────────────────
+  // networkData.edges 包含双向记录（A→B 和 B→A 各一条），
+  // 用 seenPairs 去重，每对节点只画一条线。
+  // 优先取 inferStatus=0（人工确认）的方向作为标签展示方向。
+  const rawEdges = networkData.value?.edges || []
 
-  // ===== 2. 我 ↔ 同辈（姐弟/兄弟等）=====
-  siblings.forEach(s => {
-    const label = siblingLabel(s.sublabel)
-    addEdge(me, s, label, 'sibling', 'none')
-  })
+  // 先按 inferStatus 升序排（0=人工确认 优先），保证去重时优先保留人工确认边的标签
+  const sortedEdges = [...rawEdges].sort((a, b) => a.inferStatus - b.inferStatus)
 
-  // ===== 3. 我 ↔ 配偶（夫妻）=====
-  spouses.forEach(sp => {
-    addEdge(me, sp, '夫妻', 'spouse', 'none')
-  })
+  for (const edge of sortedEdges) {
+    const aId = edge.fromUserId
+    const bId = edge.toUserId
+    // 去重 key（无方向，双向只画一条）
+    const pairKey = Math.min(aId, bId) + '-' + Math.max(aId, bId)
+    if (seenPairs.has(pairKey)) continue
+    seenPairs.add(pairKey)
 
-  // ===== 4. 我 ↔ 子女（父女/父子）=====
-  children.forEach(c => {
-    const label = c.sublabel === '女儿' ? '父女' : '父子'
-    addEdge(me, c, label, 'direct', 'none')
-  })
+    const fromNode = findNode(aId)
+    const toNode   = findNode(bId)
+    if (!fromNode || !toNode) continue   // 节点不在当前布局中（超出可见范围）
 
-  // ===== 5. 父母 ↔ 同辈（母女/父女等）=====
-  parents.forEach(p => {
-    siblings.forEach(s => {
-      const label = p.sublabel === '母亲' ? '母女' : '父女'
-      addEdge(p, s, label, 'inferred')
-    })
-  })
+    const type = edgeType(edge.relationDesc, edge.inferStatus)
+    // 虚线规则：配偶/同辈/直系确认 → 实线；推断 → 虚线
+    const dash = (type === 'spouse' || type === 'sibling' || edge.inferStatus === 0) ? 'none' : '5 3'
 
-  // ===== 6. 配偶 ↔ 子女（母女/母子）=====
-  spouses.forEach(sp => {
-    children.forEach(c => {
-      const label = c.sublabel === '女儿' ? '母女' : '母子'
-      addEdge(sp, c, label, 'inferred')
-    })
-  })
-
-  // ===== 7. 父母 ↔ 子女（祖孙）=====
-  parents.forEach(p => {
-    children.forEach(c => {
-      addEdge(p, c, '祖孙', 'inferred', '4 4')
-    })
-  })
-
-  // ===== 8. 父母 ↔ 配偶（婆媳/岳父母）=====
-  parents.forEach(p => {
-    spouses.forEach(sp => {
-      const label = p.sublabel === '母亲' ? '婆媳' : '翁婿/岳父'
-      addEdge(p, sp, label, 'inferred', '4 4')
-    })
-  })
-
-  // ===== 9. 配偶 ↔ 同辈（姑嫂）=====
-  spouses.forEach(sp => {
-    siblings.forEach(s => {
-      addEdge(sp, s, '姑嫂', 'inferred', '4 4')
-    })
-  })
-
-  // ===== 10. 同辈 ↔ 子女（姨甥/叔侄/舅甥）=====
-  siblings.forEach(s => {
-    children.forEach(c => {
-      const label = ['姐姐','妹妹'].includes(s.sublabel) ? '姨甥' : '叔侄'
-      addEdge(s, c, label, 'inferred', '4 4')
-    })
-  })
+    addEdge(fromNode, toNode, edge.relationDesc, type, dash)
+  }
 
   return result
 })
-
 // ================================================================
 // 工具方法
 // ================================================================
@@ -581,8 +610,14 @@ const lifeLabel   = s => ({ 0:'活跃',1:'不活跃',2:'疑似离世',3:'已离�
 // ================================================================
 const loadData = async () => {
   loading.value = true
-  try { directRelations.value = await relationApi.getMyRelations() || [] }
-  catch (e) { console.error(e) }
+  try {
+    const [relations, network] = await Promise.all([
+      relationApi.getMyRelations(),
+      relationApi.getRelationNetwork(),
+    ])
+    directRelations.value = relations || []
+    networkData.value     = network  || { nodes: [], edges: [] }
+  } catch (e) { console.error(e) }
   finally { loading.value = false }
 }
 
@@ -597,76 +632,239 @@ const openProfile = (userId, relationDesc) => {
   profileDrawerVisible.value = true
 }
 
+// ================================================================
+// 全量重推（重新分析家族网络关系）
+// ================================================================
+const reInferRunning  = ref(false)
+const reInferDone     = ref(false)
+const reInferStatus   = ref({ status: 'idle', progress: 0, message: '', result: null })
+let   reInferJobId    = null
+let   reInferTimer    = null
+
+// 启动全量重推任务
+const startReInfer = async () => {
+  if (reInferRunning.value) return
+  reInferRunning.value = true
+  reInferDone.value    = false
+  reInferStatus.value  = { status: 'running', progress: 0, message: '正在启动推断任务...' }
+  reInferJobId         = null
+  clearInterval(reInferTimer)
+
+  try {
+    const res = await relationApi.startFullReInfer()
+    reInferJobId = res.jobId
+    ElMessage.info('推断任务已启动，正在后台处理...')
+    // 每 1.5 秒轮询一次进度
+    reInferTimer = setInterval(pollReInferStatus, 1500)
+  } catch (e) {
+    reInferRunning.value = false
+    reInferDone.value    = true
+    reInferStatus.value  = { status: 'error', progress: 0, message: '启动失败：' + (e?.message || '网络错误') }
+    ElMessage.error('推断任务启动失败')
+  }
+}
+
+// 轮询进度
+const pollReInferStatus = async () => {
+  if (!reInferJobId) return
+  try {
+    const st = await relationApi.getReInferStatus(reInferJobId)
+    reInferStatus.value = st
+
+    if (st.status === 'done') {
+      clearInterval(reInferTimer)
+      reInferRunning.value = false
+      reInferDone.value    = true
+      ElMessage.success('关系推断完成！点击「刷新树」查看最新结果')
+    } else if (st.status === 'error') {
+      clearInterval(reInferTimer)
+      reInferRunning.value = false
+      reInferDone.value    = true
+      ElMessage.error('推断过程中出现错误：' + st.message)
+    }
+  } catch (e) {
+    // 网络抖动不停轮询，连续失败 3 次才放弃（简化：忽略单次失败）
+    console.warn('轮询状态失败:', e)
+  }
+}
+
+// 关闭进度条
+const dismissReInfer = () => {
+  clearInterval(reInferTimer)
+  reInferRunning.value = false
+  reInferDone.value    = false
+  reInferStatus.value  = { status: 'idle', progress: 0, message: '' }
+}
+
 onMounted(loadData)
+onBeforeUnmount(() => clearInterval(reInferTimer))
 </script>
 
 <style scoped>
-.family-tree-page { max-width: 1000px; }
-.card-header { display: flex; justify-content: space-between; align-items: center; }
-.header-actions { display: flex; align-items: center; }
+.family-tree-page { max-width: 1060px; }
 
-/* 图例 */
+/* ── 全量重推进度条 ── */
+.reinfer-bar {
+  background: linear-gradient(135deg, rgba(90,103,242,.06) 0%, rgba(245,158,11,.04) 100%);
+  border-bottom: 1px solid var(--c-border);
+  padding: 10px 20px;
+  margin: -20px -20px 16px;   /* 撑满 el-card__body 的 padding */
+}
+.reinfer-bar-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.reinfer-icon {
+  width: 28px; height: 28px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-size: 16px;
+}
+.reinfer-icon.running { color: var(--c-primary); }
+.reinfer-icon.done    { color: var(--c-success); }
+.reinfer-icon.error   { color: var(--c-danger); }
+.reinfer-info { flex: 1; min-width: 0; }
+.reinfer-msg  { font-size: 13px; font-weight: 600; color: var(--c-txt); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.reinfer-result { font-size: 12px; color: var(--c-txt-s); margin-top: 4px; }
+.reinfer-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+
+/* 进度条展开动画 */
+.slide-down-enter-active, .slide-down-leave-active {
+  transition: max-height .3s ease, opacity .25s ease, padding .3s ease;
+  overflow: hidden;
+}
+.slide-down-enter-from, .slide-down-leave-to {
+  max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0;
+}
+.slide-down-enter-to, .slide-down-leave-from { max-height: 100px; opacity: 1; }
+
+/* ── Card 覆盖 ── */
+:deep(.el-card) {
+  border-radius: var(--radius-md) !important;
+  border: 1px solid var(--c-border) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+:deep(.el-card__header) {
+  background: #F8FAFC;
+  border-bottom: 1px solid var(--c-border);
+  padding: 14px 20px;
+}
+
+.card-header { display: flex; justify-content: space-between; align-items: center; }
+
+/* ── 图例 ── */
 .legend-bar {
   display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
-  margin-bottom: 12px; font-size: 12px; color: #606266;
+  margin-bottom: 14px; font-size: 12px; color: var(--c-txt-s);
+  padding: 10px 14px; background: #F8FAFC; border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
 }
-.legend-item { display: flex; align-items: center; gap: 4px; }
+.legend-item { display: flex; align-items: center; gap: 5px; font-weight: 500; }
 .dot { width: 10px; height: 10px; border-radius: 50%; }
-.legend-sep { width: 1px; height: 16px; background: #e4e7ed; }
-.legend-tip { display: flex; align-items: center; gap: 6px; color: #909399; }
-.edge-solid { display: inline-block; width: 24px; height: 2px; background: #667eea; border-radius: 1px; }
-.edge-dash  { display: inline-block; width: 24px; height: 0; border-top: 2px dashed #fa8231; }
+.legend-sep { width: 1px; height: 16px; background: var(--c-border); }
+.legend-tip { display: flex; align-items: center; gap: 6px; color: var(--c-txt-i); }
+.edge-solid { display: inline-block; width: 22px; height: 2px; background: #5A67F2; border-radius: 2px; }
+.edge-dash  { display: inline-block; width: 22px; height: 0; border-top: 2px dashed #F59E0B; }
 
-/* SVG 区域 */
+/* ── SVG 区域 ── */
 .tree-wrapper { position: relative; }
-.svg-wrap { overflow-x: auto; overflow-y: hidden; }
-.tree-svg, svg { display: block; background: #f8faff; border-radius: 8px; border: 1px solid #eef0f6; cursor: pointer; }
+.svg-wrap { overflow-x: auto; overflow-y: hidden; border-radius: var(--radius-sm); }
+svg {
+  display: block;
+  background: linear-gradient(135deg, #F8FAFF 0%, #F1F5FF 100%);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+}
 
-/* 节点 */
-.node-g { cursor: pointer; transition: opacity 0.15s; }
-.node-g:hover circle:first-child { filter: brightness(1.1); }
-
-/* 边标注 */
+/* ── 节点 ── */
+.node-g { cursor: pointer; transition: opacity .15s; }
+.node-g:hover { opacity: .88; }
 .edge-label {
-  font-weight: 600;
+  font-weight: 700;
   paint-order: stroke;
-  stroke: #f8faff;
+  stroke: rgba(248,250,255,.9);
   stroke-width: 3px;
 }
 
-/* 详情卡片 */
+/* ── 详情卡片 ── */
 .detail-card {
   position: absolute; right: 0; top: 0;
-  width: 220px; background: #fff;
-  border-radius: 10px; border: 1px solid #eee;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.1);
-  padding: 14px; z-index: 20;
+  width: 230px;
+  background: rgba(255,255,255,.97);
+  backdrop-filter: blur(12px);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--c-border);
+  box-shadow: var(--shadow-lg);
+  padding: 16px;
+  z-index: 20;
 }
-.detail-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.detail-name { font-size: 15px; font-weight: 700; line-height: 1.3; }
+.detail-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.detail-name { font-size: 15px; font-weight: 800; color: var(--c-txt); line-height: 1.3; }
 .detail-relations { margin-top: 10px; }
-.detail-rel-title { font-size: 11px; color: #909399; margin-bottom: 6px; }
-.detail-rel-item { display: flex; align-items: center; justify-content: space-between;
-  padding: 3px 0; border-bottom: 1px dashed #f0f0f0; }
-.rel-name { font-size: 12px; color: #303133; }
-.no-rel { font-size: 12px; color: #c0c4cc; }
-.slide-fade-enter-active, .slide-fade-leave-active { transition: all .2s ease; }
-.slide-fade-enter-from, .slide-fade-leave-to { opacity: 0; transform: translateX(12px); }
+.detail-rel-title { font-size: 11px; color: var(--c-txt-s); font-weight: 600; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
+.detail-rel-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 0; border-bottom: 1px dashed var(--c-border);
+}
+.rel-name { font-size: 12px; color: var(--c-txt); font-weight: 500; }
+.no-rel { font-size: 12px; color: var(--c-txt-i); }
 
-/* 列表视图 */
-.list-view { display: flex; flex-direction: column; gap: 16px; }
+.slide-fade-enter-active, .slide-fade-leave-active { transition: all .22s ease; }
+.slide-fade-enter-from, .slide-fade-leave-to { opacity: 0; transform: translateX(14px); }
+
+/* ── 列表视图 ── */
+.list-view { display: flex; flex-direction: column; gap: 20px; }
 .relation-group {}
 .group-title {
-  font-size: 12px; color: #909399; font-weight: 600;
-  margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px dashed #eee;
+  font-size: 12px; color: var(--c-txt-s); font-weight: 700;
+  margin-bottom: 10px; padding-bottom: 6px;
+  border-bottom: 2px solid var(--c-border);
+  text-transform: uppercase; letter-spacing: .5px;
 }
 .group-items { display: flex; flex-wrap: wrap; gap: 10px; }
 .list-card {
   display: flex; align-items: center; gap: 10px;
-  background: #fafafa; border-radius: 8px;
-  padding: 10px 14px; min-width: 180px;
-  border: 1px solid #f0f0f0;
+  background: var(--c-surface);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px; min-width: 190px;
+  border: 1px solid var(--c-border);
+  box-shadow: var(--shadow-sm);
+  transition: var(--transition);
 }
-.list-info {}
-.list-name { font-weight: 600; font-size: 13px; margin-bottom: 3px; }
+.list-card:hover { box-shadow: var(--shadow-md); border-color: var(--c-primary); transform: translateY(-1px); }
+.list-name { font-weight: 700; font-size: 13px; color: var(--c-txt); margin-bottom: 4px; }
+
+@media (max-width: 768px) {
+  .family-tree-page { max-width: 100%; }
+  :deep(.el-card__header) { padding: 10px 12px; }
+  :deep(.el-card__body) { padding: 12px; }
+  /* 图例简化 */
+  .legend-bar { gap: 8px; padding: 8px 10px; font-size: 11px; }
+  .legend-sep, .legend-tip { display: none; }
+  /* SVG 横滚 */
+  .svg-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  /* 详情卡片变底部浮窗 */
+  .detail-card {
+    position: fixed !important;
+    right: 0 !important;
+    left: 0 !important;
+    top: auto !important;
+    bottom: calc(56px + env(safe-area-inset-bottom, 0px)) !important;
+    width: 100% !important;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
+    max-height: 50vh;
+    overflow-y: auto;
+    box-shadow: 0 -8px 32px rgba(0,0,0,.15);
+    padding: 16px;
+    z-index: 90;
+  }
+  /* 列表视图 */
+  .list-card { min-width: 0; width: 100%; flex: 1 1 calc(50% - 5px); box-sizing: border-box; }
+  .group-items { flex-direction: row; flex-wrap: wrap; }
+}
+@media (max-width: 480px) {
+  .list-card { flex: 1 1 100%; }
+}
+
 </style>

@@ -28,7 +28,7 @@
               <el-tag :type="lifeTagType(row.lifeStatus)" size="small">{{ lifeLabel(row.lifeStatus) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="确认时间" min-width="140">
+          <el-table-column label="确认时间" min-width="140" class-name="col-confirm-time">
             <template #default="{ row }">{{ fmt(row.confirmTime) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="100" fixed="right">
@@ -337,36 +337,95 @@ onMounted(() => { loadRelations(); loadPendingApplies() })
 </script>
 
 <style scoped>
-.relation-page { padding: 0; }
-.tab-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.tab-title { font-size: 14px; color: #606266; }
-.search-tip { color: #909399; font-size: 13px; margin-bottom: 14px; display: flex; align-items: center; gap: 6px; }
+.relation-page { max-width: 900px; }
+
+/* ── Tab 覆盖 ── */
+:deep(.el-tabs--border-card) {
+  border-radius: var(--radius-md) !important;
+  border: 1px solid var(--c-border) !important;
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+:deep(.el-tabs__header) { background: #F8FAFC !important; border-bottom: 1px solid var(--c-border) !important; }
+:deep(.el-tabs__item) { font-weight: 600; color: var(--c-txt-s) !important; }
+:deep(.el-tabs__item.is-active) { color: var(--c-primary) !important; background: #fff !important; }
+
+.tab-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+.tab-title { font-size: 13px; font-weight: 700; color: var(--c-txt-s); text-transform: uppercase; letter-spacing: .5px; }
+.search-tip {
+  color: var(--c-txt-s); font-size: 13px; margin-bottom: 16px;
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(90,103,242,.06); padding: 10px 14px;
+  border-radius: var(--radius-sm); border-left: 3px solid var(--c-primary);
+}
 .search-result { max-width: 500px; margin-top: 14px; }
 .result-info { display: flex; align-items: center; gap: 14px; }
 .result-detail { flex: 1; }
-.result-name { font-size: 16px; font-weight: 600; }
-.result-sub { font-size: 13px; color: #909399; margin: 2px 0; }
+.result-name { font-size: 16px; font-weight: 700; color: var(--c-txt); }
+.result-sub { font-size: 12px; color: var(--c-txt-s); margin: 3px 0; }
 
 .apply-list { display: flex; flex-direction: column; gap: 10px; }
-.apply-card { cursor: default; }
+.apply-card { border: 1px solid var(--c-border) !important; border-radius: var(--radius-md) !important; }
 .apply-row { display: flex; justify-content: space-between; align-items: center; }
 .apply-left { display: flex; gap: 12px; align-items: flex-start; }
-.apply-name { font-size: 14px; font-weight: 600; }
-.apply-sub { font-size: 12px; color: #909399; }
-.apply-reason { font-size: 12px; color: #606266; }
-.apply-time { font-size: 11px; color: #c0c4cc; }
+.apply-name { font-size: 14px; font-weight: 700; color: var(--c-txt); margin-bottom: 4px; }
+.apply-sub { font-size: 12px; color: var(--c-txt-s); }
+.apply-reason { font-size: 12px; color: var(--c-txt-s); margin-top: 2px; }
+.apply-time { font-size: 11px; color: var(--c-txt-i); margin-top: 3px; }
 .apply-btns { display: flex; gap: 8px; }
 
-/* 步骤链构建器 */
+/* ── 步骤链构建器 ── */
 .chain-builder { display: flex; flex-direction: column; gap: 10px; }
 .chain-steps {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
-  min-height: 36px; padding: 6px 10px;
-  background: #f8f9fc; border-radius: 8px; border: 1px dashed #dcdfe6;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  min-height: 40px; padding: 8px 12px;
+  background: #F8FAFC;
+  border-radius: var(--radius-sm);
+  border: 1.5px dashed var(--c-border);
+  transition: border-color .2s;
 }
-.chain-placeholder { color: #c0c4cc; font-size: 13px; }
-.chain-arrow { color: #909399; font-weight: 700; margin: 0 4px; }
-.chain-options { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-.options-label { font-size: 12px; color: #909399; margin-right: 4px; }
-.chain-done { font-size: 13px; color: #67c23a; display: flex; align-items: center; gap: 4px; }
+.chain-steps:focus-within { border-color: var(--c-primary); }
+.chain-placeholder { color: var(--c-txt-i); font-size: 13px; }
+.chain-arrow { color: var(--c-txt-i); font-weight: 700; margin: 0 4px; font-size: 16px; }
+.chain-options { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.options-label { font-size: 12px; color: var(--c-txt-s); margin-right: 2px; font-weight: 600; }
+.chain-done { font-size: 13px; color: var(--c-success); display: flex; align-items: center; gap: 5px; font-weight: 600; }
+
+@media (max-width: 768px) {
+  .relation-page { max-width: 100%; }
+  /* Tab 横滚 */
+  :deep(.el-tabs__nav) { flex-wrap: nowrap; }
+  :deep(.el-tabs__item) { font-size: 12px !important; padding: 0 10px !important; }
+  /* 表格横滚 */
+  :deep(.el-table) { font-size: 13px; }
+  :deep(.el-table__header th) { padding: 8px 0 !important; }
+  :deep(.el-table__body td)  { padding: 6px 0 !important; }
+  .tab-header { flex-direction: column; align-items: flex-start; gap: 10px; }
+  /* 搜索栏 */
+  :deep(.el-form--inline .el-form-item) { flex-direction: column; width: 100%; }
+  :deep(.el-form--inline .el-input) { width: 100% !important; }
+  .search-result { max-width: 100%; }
+  .result-info { flex-wrap: wrap; gap: 10px; }
+  /* 申请卡片 */
+  .apply-row { flex-direction: column; gap: 12px; align-items: flex-start; }
+  .apply-btns { width: 100%; }
+  .apply-btns .el-button { flex: 1; }
+  /* 链式构建器 */
+  .chain-options { gap: 6px; }
+  :deep(.el-dialog) { margin: 0 !important; width: 100% !important; border-radius: 16px 16px 0 0 !important; position: fixed !important; bottom: 0 !important; }
+  :deep(.el-dialog__body) { max-height: 65vh; overflow-y: auto; }
+}
+@media (max-width: 480px) {
+  :deep(.el-table-column--selection .el-checkbox) { display: none; }
+}
+@media (max-width: 640px) {
+  /* 手机上隐藏"确认时间"列 */
+  :deep(.col-confirm-time) { display: none !important; }
+  :deep(.col-confirm-time *) { display: none !important; }
+  /* 搜索输入框全宽 */
+  :deep(.el-form--inline .el-input__inner) { font-size: 14px; }
+  /* 亲属列表改卡片样式 */
+  :deep(.el-table__row) { cursor: pointer; }
+}
+
 </style>

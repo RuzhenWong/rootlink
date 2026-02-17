@@ -127,31 +127,24 @@ const handleSubmit = async () => {
 </script>
 
 <style scoped>
-.realname-page {
-  max-width: 600px;
-  margin: 0 auto;
+.realname-page { max-width: 640px; }
+:deep(.el-card) { border-radius: var(--radius-md) !important; border: 1px solid var(--c-border) !important; box-shadow: var(--shadow-sm) !important; }
+:deep(.el-card__header) { background: #F8FAFC; border-bottom: 1px solid var(--c-border); }
+:deep(.el-input__wrapper) { border-radius: var(--radius-sm) !important; border: 1.5px solid var(--c-border) !important; box-shadow: none !important; transition: var(--transition) !important; }
+:deep(.el-input__wrapper:hover) { border-color: var(--c-primary) !important; }
+:deep(.el-input__wrapper.is-focus) { border-color: var(--c-primary) !important; box-shadow: 0 0 0 3px rgba(90,103,242,.1) !important; }
+:deep(.el-form-item__label) { font-weight: 600; color: var(--c-txt-s); font-size: 13px; }
+:deep(.el-alert) { border-radius: var(--radius-sm) !important; border: 1px solid; }
+:deep(.el-result) { padding: 40px 20px; }
+
+@media (max-width: 768px) {
+  .realname-page { max-width: 100%; }
+  :deep(.el-card__body) { padding: 16px 12px; }
+  :deep(.el-form-item__label) { width: 100% !important; float: none !important; text-align: left !important; padding: 0 0 4px; }
+  :deep(.el-form-item__content) { margin-left: 0 !important; }
+  :deep(.el-steps) { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 4px; }
+  :deep(.el-step__title) { font-size: 11px; }
+  :deep(.el-button--large) { width: 100%; }
 }
 
-.card-header h2 {
-  margin: 0 0 8px 0;
-  color: #333;
-}
-
-.card-header p {
-  margin: 0;
-  color: #666;
-  font-size: 14px;
-}
-
-.notice-alert {
-  margin-bottom: 30px;
-}
-
-.notice-alert ul {
-  line-height: 1.8;
-}
-
-.realname-form {
-  margin-top: 20px;
-}
 </style>

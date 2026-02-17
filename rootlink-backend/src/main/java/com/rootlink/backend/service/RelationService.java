@@ -233,6 +233,7 @@ public class RelationService {
             // 获取所有候选节点的性别（批量查）
             Set<Long> allIds = new HashSet<>(candidates);
             allIds.add(userA);
+            allIds.add(userB);   // 修复：userB 是路径中间节点，其性别必须在 genderMap 中
             Map<Long, Integer> genderMap = batchGetGender(allIds);
 
             int saved = 0;
@@ -322,6 +323,195 @@ public class RelationService {
     }
 
     // ═══════════════════════════════════════════════════
+    // 全量重推任务进度追踪
+    // ═══════════════════════════════════════════════════
+
+    /** 任务进度 Map：jobId → { status, progress, total, message, result } */
+    private final java.util.concurrent.ConcurrentHashMap<String, Map<String,Object>> reInferJobs
+            = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 查询重推进度（前端轮询） */
+    public Map<String, Object> getReInferStatus(Long userId, String jobId) {
+        Map<String, Object> job = reInferJobs.get(jobId);
+        if (job == null) {
+            Map<String, Object> notFound = new HashMap<>();
+            notFound.put("jobId", jobId);
+            notFound.put("status", "not_found");
+            notFound.put("message", "任务不存在或已过期");
+            return notFound;
+        }
+        // 仅任务所有者可查询
+        if (!jobId.startsWith(userId + "_")) {
+            Map<String, Object> denied = new HashMap<>();
+            denied.put("status", "error");
+            denied.put("message", "无权查询此任务");
+            return denied;
+        }
+        return new HashMap<>(job);
+    }
+
+    private void updateJobStatus(String jobId, String status, int progress, int total, String message) {
+        Map<String, Object> job = reInferJobs.computeIfAbsent(jobId, k -> new HashMap<>());
+        job.put("jobId", jobId);
+        job.put("status", status);
+        job.put("progress", progress);
+        job.put("total", total);
+        job.put("message", message);
+        job.put("updatedAt", System.currentTimeMillis());
+    }
+
+    // ═══════════════════════════════════════════════════
+    // 全量重推（刷新按钮入口）
+    // ═══════════════════════════════════════════════════
+
+    /**
+     * 以 originUserId 为起点，BFS 遍历整个可达亲属网络：
+     * 1. 收集网络内所有【手动确认】的关系边（infer_status=0, confirmStatus=1）
+     * 2. 删除网络内所有【推断生成】的关系（infer_status=2），避免错误累积
+     * 3. 把所有确认边重新同步到 Nebula（强制刷新 parent_gender / child_gender 属性）
+     * 4. 对网络内每条确认边触发 propagateNewEdge，全量重新推断
+     *
+     * 效果：修复历史错误的性别推断（母子→父子），补全缺失关系，应用到所有可见成员。
+     */
+    @Async
+    public void fullReInfer(Long originUserId, String jobId) {
+        log.info("[全量重推] 开始，起点 userId={}, jobId={}", originUserId, jobId);
+        updateJobStatus(jobId, "running", 0, 100, "正在收集亲属网络...");
+        try {
+            // ── Step1: BFS 收集可达用户集合 ──────────────────────────
+            Set<Long> visited = new LinkedHashSet<>();
+            Queue<Long> queue = new LinkedList<>();
+            queue.add(originUserId);
+            visited.add(originUserId);
+
+            while (!queue.isEmpty()) {
+                Long uid = queue.poll();
+                LambdaQueryWrapper<UserRelation> w = new LambdaQueryWrapper<>();
+                w.eq(UserRelation::getUserId, uid)
+                 .eq(UserRelation::getConfirmStatus, 1)
+                 .eq(UserRelation::getDeleted, 0);
+                for (UserRelation r : relationMapper.selectList(w)) {
+                    if (!visited.contains(r.getRelatedUserId())) {
+                        visited.add(r.getRelatedUserId());
+                        queue.add(r.getRelatedUserId());
+                    }
+                }
+            }
+            log.info("[全量重推] 可达用户 {} 人: {}", visited.size(), visited);
+            updateJobStatus(jobId, "running", 10, 100,
+                    "发现 " + visited.size() + " 位亲属成员，正在收集确认关系...");
+
+            // ── Step2: 收集手动确认边（infer_status=0，去重） ──────────
+            List<UserRelation> manualEdges = new ArrayList<>();
+            Set<String> edgeSeen = new HashSet<>();
+            for (Long uid : visited) {
+                LambdaQueryWrapper<UserRelation> w = new LambdaQueryWrapper<>();
+                w.eq(UserRelation::getUserId, uid)
+                 .eq(UserRelation::getInferStatus, 0)
+                 .eq(UserRelation::getConfirmStatus, 1)
+                 .eq(UserRelation::getDeleted, 0);
+                for (UserRelation r : relationMapper.selectList(w)) {
+                    Long a = r.getUserId(), b = r.getRelatedUserId();
+                    String key = Math.min(a, b) + "_" + Math.max(a, b);
+                    if (edgeSeen.add(key)) manualEdges.add(r);
+                }
+            }
+            log.info("[全量重推] 手动确认边 {} 条", manualEdges.size());
+            updateJobStatus(jobId, "running", 20, 100,
+                    "找到 " + manualEdges.size() + " 条原始关系，正在清理旧推断...");
+
+            // ── Step3: 清除旧推断关系（infer_status=2 的全部删掉重来） ──
+            int deleted = 0;
+            for (Long uid : visited) {
+                LambdaQueryWrapper<UserRelation> del = new LambdaQueryWrapper<>();
+                del.eq(UserRelation::getUserId, uid)
+                   .eq(UserRelation::getInferStatus, 2)
+                   .in(UserRelation::getRelatedUserId, visited)
+                   .eq(UserRelation::getDeleted, 0);
+                deleted += relationMapper.delete(del);
+            }
+            log.info("[全量重推] 已清除旧推断 {} 条", deleted);
+            updateJobStatus(jobId, "running", 30, 100,
+                    "清除了 " + deleted + " 条旧推断，正在修正性别数据...");
+
+            // ── Step4: 批量加载全网性别 ──────────────────────────────
+            Map<Long, Integer> genderMap = batchGetGender(visited);
+
+            // ── Step5: 重建 Nebula 边（强制刷新 gender 属性，解决母子推断成父子问题） ──
+            if (nebulaUtil.isAvailable()) {
+                updateJobStatus(jobId, "running", 35, 100,
+                        "正在重建关系图数据库（修正性别属性）...");
+                // 先删除网络内所有边（绕过 IF NOT EXISTS，强制刷新 gender 属性）
+                for (Long uid : visited) {
+                    for (Long other : visited) {
+                        if (!uid.equals(other)) nebulaUtil.removeRelationFromGraph(uid, other);
+                    }
+                }
+                // 重新写入，携带最新 gender
+                for (UserRelation r : manualEdges) {
+                    String chainJson = r.getRelationChain();
+                    if (chainJson == null || chainJson.isBlank() || "[]".equals(chainJson)) continue;
+                    List<String> chain = inferUtil.jsonToChain(chainJson);
+                    nebulaUtil.syncRelationToGraph(chain, r.getUserId(), r.getRelatedUserId(),
+                            genderMap.get(r.getUserId()), genderMap.get(r.getRelatedUserId()));
+                }
+                log.info("[全量重推] Nebula 边重建完成");
+            }
+
+            // ── Step6: 逐条触发推断扩散 ────────────────────────────────
+            int total = manualEdges.size();
+            int done  = 0;
+            for (UserRelation r : manualEdges) {
+                try {
+                    if (nebulaUtil.isAvailable()) {
+                        propagateNewEdge(r.getUserId(), r.getRelatedUserId());
+                    } else {
+                        triggerInferenceFallback(r.getUserId(), r.getRelatedUserId());
+                    }
+                } catch (Exception ex) {
+                    log.warn("[全量重推] 单边失败 A={} B={}: {}", r.getUserId(), r.getRelatedUserId(), ex.getMessage());
+                }
+                done++;
+                int pct = 40 + (int)(done * 55.0 / Math.max(total, 1));
+                updateJobStatus(jobId, "running", pct, 100,
+                        "推断进度 " + done + "/" + total);
+            }
+
+            // ── Step7: 统计推断结果 ──────────────────────────────────
+            int newInferred = 0;
+            for (Long uid : visited) {
+                LambdaQueryWrapper<UserRelation> cntW = new LambdaQueryWrapper<>();
+                cntW.eq(UserRelation::getUserId, uid)
+                    .eq(UserRelation::getInferStatus, 2)
+                    .in(UserRelation::getRelatedUserId, visited)
+                    .eq(UserRelation::getDeleted, 0);
+                newInferred += relationMapper.selectCount(cntW);
+            }
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("networkSize", visited.size());
+            result.put("manualEdges", total);
+            result.put("deletedOld", deleted);
+            result.put("newInferred", newInferred);
+
+            Map<String, Object> job = reInferJobs.computeIfAbsent(jobId, k -> new HashMap<>());
+            job.put("jobId", jobId);
+            job.put("status", "done");
+            job.put("progress", 100);
+            job.put("total", 100);
+            job.put("message", String.format("完成！共处理 %d 位成员，%d 条原始关系，新推断 %d 条",
+                    visited.size(), total, newInferred));
+            job.put("result", result);
+            job.put("updatedAt", System.currentTimeMillis());
+            log.info("[全量重推] 完成 jobId={} result={}", jobId, result);
+
+        } catch (Exception e) {
+            log.error("[全量重推] 异常 jobId={}: {}", jobId, e.getMessage(), e);
+            updateJobStatus(jobId, "error", 0, 100, "推断失败：" + e.getMessage());
+        }
+    }
+
+    // ═══════════════════════════════════════════════════
     // 确认 / 拒绝推断关系
     // ═══════════════════════════════════════════════════
 
@@ -389,6 +579,78 @@ public class RelationService {
          .eq(UserRelation::getConfirmStatus, 0)
          .eq(UserRelation::getDeleted, 0);
         return buildRelationList(w);
+    }
+
+    /**
+     * 家族关系树全网数据接口
+     *
+     * 以当前用户为起点，BFS 遍历整个可达亲属网络，返回：
+     *   nodes：所有节点（userId, realName, lifeStatus, isMe）
+     *   edges：所有已确认关系边（fromUserId, toUserId, relationDesc, inferStatus）
+     *
+     * 前端凭此数据驱动连线，不再依赖硬编码规则。
+     */
+    public Map<String, Object> getRelationNetwork(Long currentUserId) {
+        // ── Step1: BFS 收集可达用户 ──────────────────────
+        Set<Long> visited = new LinkedHashSet<>();
+        Queue<Long> queue = new LinkedList<>();
+        queue.add(currentUserId);
+        visited.add(currentUserId);
+
+        while (!queue.isEmpty()) {
+            Long uid = queue.poll();
+            LambdaQueryWrapper<UserRelation> w = new LambdaQueryWrapper<>();
+            w.eq(UserRelation::getUserId, uid)
+             .eq(UserRelation::getConfirmStatus, 1)
+             .in(UserRelation::getInferStatus, 0, 2)
+             .eq(UserRelation::getDeleted, 0);
+            for (UserRelation r : relationMapper.selectList(w)) {
+                if (!visited.contains(r.getRelatedUserId())) {
+                    visited.add(r.getRelatedUserId());
+                    queue.add(r.getRelatedUserId());
+                }
+            }
+        }
+
+        // ── Step2: 查所有边（不去重，前端两方向都要用） ──
+        List<Map<String, Object>> edges = new ArrayList<>();
+        for (Long uid : visited) {
+            LambdaQueryWrapper<UserRelation> w = new LambdaQueryWrapper<>();
+            w.eq(UserRelation::getUserId, uid)
+             .eq(UserRelation::getConfirmStatus, 1)
+             .in(UserRelation::getInferStatus, 0, 2)
+             .in(UserRelation::getRelatedUserId, visited)
+             .eq(UserRelation::getDeleted, 0);
+            for (UserRelation r : relationMapper.selectList(w)) {
+                Map<String, Object> edge = new HashMap<>();
+                edge.put("fromUserId", uid);
+                edge.put("toUserId", r.getRelatedUserId());
+                edge.put("relationDesc", r.getRelationDesc());
+                edge.put("inferStatus", r.getInferStatus());
+                edges.add(edge);
+            }
+        }
+
+        // ── Step3: 节点基本信息 ────────────────────────────
+        List<Map<String, Object>> nodes = new ArrayList<>();
+        if (!visited.isEmpty()) {
+            Map<Long, User> userMap = userMapper.selectBatchIds(visited).stream()
+                    .collect(Collectors.toMap(User::getId, u -> u));
+            for (Long uid : visited) {
+                User u = userMap.get(uid);
+                Map<String, Object> node = new HashMap<>();
+                node.put("userId", uid);
+                node.put("realName", u != null && u.getRealName() != null ? u.getRealName() : null);
+                node.put("lifeStatus", u != null ? u.getLifeStatus() : 0);
+                node.put("isMe", uid.equals(currentUserId));
+                nodes.add(node);
+            }
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("nodes", nodes);
+        result.put("edges", edges);
+        return result;
     }
 
     public List<Map<String, Object>> getPendingApplies(Long userId) {

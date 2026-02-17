@@ -104,4 +104,17 @@ public class UserController {
     public Result<Map<String, Object>> getRealNameStatus(@RequestAttribute("userId") Long userId) {
         return Result.success(userService.getRealNameStatus(userId));
     }
+
+    /** 查看自己的实名信息（姓名 + 身份证号明文，仅限本人调用） */
+    @GetMapping("/realname/idcard")
+    public Result<Map<String, Object>> getMyIdCard(@RequestAttribute("userId") Long userId) {
+        return Result.success(userService.getMyIdCard(userId));
+    }
+
+    /** 注销账号：级联删除当前用户全部数据，操作不可逆 */
+    @DeleteMapping("/deactivate")
+    public Result<Void> deactivateAccount(@RequestAttribute("userId") Long userId) {
+        userService.deactivateAccount(userId);
+        return Result.success();
+    }
 }

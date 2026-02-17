@@ -5,12 +5,12 @@ import com.vesoft.nebula.client.graph.data.ResultSet;
 import com.vesoft.nebula.client.graph.data.ValueWrapper;
 import com.vesoft.nebula.client.graph.net.NebulaPool;
 import com.vesoft.nebula.client.graph.net.Session;
-import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import jakarta.annotation.PostConstruct;
 import java.util.*;
 
 /**
@@ -48,11 +48,35 @@ public class NebulaUtil {
     public void initSchema() {
         if (!isAvailable()) return;
         try {
+            // 1. 创建图空间
             executeOnMeta(String.format(
                 "CREATE SPACE IF NOT EXISTS `%s`" +
                 "(partition_num=1,replica_factor=1,vid_type=INT64)", space));
-            Thread.sleep(2000);
+            
+            // 2. 等待图空间就绪（最多重试 10 次，共 20 秒）
+            boolean spaceReady = false;
+            for (int i = 0; i < 10; i++) {
+                Thread.sleep(2000);  // 每次等 2 秒
+                try {
+                    // 尝试切换图空间，成功则跳出循环
+                    doExecute("USE " + space);
+                    spaceReady = true;
+                    log.info("图空间 {} 已就绪（等待 {}s）", space, (i+1)*2);
+                    break;
+                } catch (Exception e) {
+                    if (i == 9) {
+                        // 最后一次还是失败，抛出异常
+                        throw new RuntimeException("图空间创建超时，请检查 NebulaGraph 服务状态");
+                    }
+                    // 否则继续等待
+                }
+            }
+            
+            if (!spaceReady) {
+                throw new RuntimeException("图空间未就绪，Schema 初始化中止");
+            }
 
+            // 3. 创建 TAG 和 EDGE（此时图空间已就绪）
             execute("CREATE TAG IF NOT EXISTS Person(name string,gender int,life_status int)");
             execute("CREATE EDGE IF NOT EXISTS PARENT_OF(parent_gender int,child_gender int)");
             execute("CREATE EDGE IF NOT EXISTS SPOUSE_OF()");
@@ -60,7 +84,7 @@ public class NebulaUtil {
             Thread.sleep(1000);
             log.info("NebulaGraph Schema 初始化完成");
         } catch (Exception e) {
-            log.warn("NebulaGraph Schema 初始化警告（可能已存在）：{}", e.getMessage());
+            log.error("NebulaGraph Schema 初始化失败：{}", e.getMessage(), e);
         }
     }
 
@@ -156,28 +180,44 @@ public class NebulaUtil {
             if ("父".equals(first) || "母".equals(first)) {
                 // B 是 A 的父/母 → B PARENT_OF A
                 execute(String.format(
-                    "INSERT EDGE IF NOT EXISTS PARENT_OF(parent_gender,child_gender) VALUES %d->%d:(%d,%d)",
+                    "INSERT EDGE PARENT_OF(parent_gender,child_gender) VALUES %d->%d:(%d,%d)",
                     userBId, userAId, gB, gA));
 
             } else if ("子".equals(first) || "女".equals(first)) {
                 // B 是 A 的子/女 → A PARENT_OF B
                 execute(String.format(
-                    "INSERT EDGE IF NOT EXISTS PARENT_OF(parent_gender,child_gender) VALUES %d->%d:(%d,%d)",
+                    "INSERT EDGE PARENT_OF(parent_gender,child_gender) VALUES %d->%d:(%d,%d)",
                     userAId, userBId, gA, gB));
 
             } else if ("配偶".equals(first)) {
                 execute(String.format(
-                    "INSERT EDGE IF NOT EXISTS SPOUSE_OF() VALUES %d->%d:(),%d->%d:()",
+                    "INSERT EDGE SPOUSE_OF() VALUES %d->%d:(),%d->%d:()",
                     userAId, userBId, userBId, userAId));
 
             } else if ("同辈".equals(first)) {
                 execute(String.format(
-                    "INSERT EDGE IF NOT EXISTS SIBLING_OF() VALUES %d->%d:(),%d->%d:()",
+                    "INSERT EDGE SIBLING_OF() VALUES %d->%d:(),%d->%d:()",
                     userAId, userBId, userBId, userAId));
             }
             log.info("关系同步到 Nebula: A={} B={} chain={}", userAId, userBId, chain);
         } catch (Exception e) {
             log.error("关系同步 Nebula 失败 A={} B={}: {}", userAId, userBId, e.getMessage());
+        }
+    }
+
+    /**
+     * 删除指定用户的 Person 顶点及其所有关联边（用于账号注销）
+     * NebulaGraph 3.x 中删顶点时需先删边，使用 DELETE VERTEX … WITH EDGE 语法
+     */
+    public void deletePersonVertex(Long userId) {
+        if (!isAvailable()) return;
+        try {
+            // WITH EDGE 会级联删除该顶点的所有入边和出边
+            execute(String.format("DELETE VERTEX %d WITH EDGE", userId));
+            log.info("Nebula Person 顶点删除完成: userId={}", userId);
+        } catch (Exception e) {
+            log.error("Nebula 删除顶点失败 userId={}: {}", userId, e.getMessage());
+            throw new RuntimeException("Nebula 删除顶点失败: " + e.getMessage(), e);
         }
     }
 

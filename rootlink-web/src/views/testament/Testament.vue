@@ -279,28 +279,34 @@ onMounted(loadList)
 </script>
 
 <style scoped>
-.testament-page { max-width: 900px; }
-.card-header { display: flex; justify-content: space-between; align-items: center; }
-.testament-list { display: flex; flex-direction: column; gap: 14px; }
-.testament-item { cursor: default; }
-.item-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-.item-title { display: flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; }
-.item-actions { display: flex; gap: 4px; }
-.item-preview {
-  font-size: 13px; color: #606266; line-height: 1.7;
-  white-space: pre-wrap; padding: 8px 0;
-  border-top: 1px dashed #eee; border-bottom: 1px dashed #eee; min-height: 36px;
+.testament-page { max-width: 860px; }
+:deep(.el-card) { border-radius: var(--radius-md) !important; border: 1px solid var(--c-border) !important; box-shadow: var(--shadow-sm) !important; }
+:deep(.el-card__header) { background: #F8FAFC; border-bottom: 1px solid var(--c-border); padding: 14px 20px; }
+:deep(.el-input__wrapper) { border-radius: var(--radius-sm) !important; border: 1.5px solid var(--c-border) !important; box-shadow: none !important; transition: var(--transition) !important; }
+:deep(.el-input__wrapper:hover) { border-color: var(--c-primary) !important; }
+:deep(.el-input__wrapper.is-focus) { border-color: var(--c-primary) !important; box-shadow: 0 0 0 3px rgba(90,103,242,.1) !important; }
+:deep(.el-textarea__inner) { border-radius: var(--radius-sm) !important; border: 1.5px solid var(--c-border) !important; box-shadow: none !important; }
+:deep(.el-upload-dragger) { border-radius: var(--radius-sm) !important; border: 1.5px dashed var(--c-border) !important; background: #F8FAFC; transition: var(--transition) !important; }
+:deep(.el-upload-dragger:hover) { border-color: var(--c-primary) !important; background: rgba(90,103,242,.03); }
+:deep(.el-steps) { margin-bottom: 24px; }
+
+@media (max-width: 768px) {
+  .testament-page { max-width: 100%; }
+  :deep(.el-card__header) { padding: 10px 12px; }
+  :deep(.el-card__body)   { padding: 12px; }
+  /* 表格横滚 */
+  :deep(.el-table) { font-size: 12px; }
+  /* 按钮 */
+  :deep(.el-button--primary) { min-width: 0; }
+  /* Steps 横滚 */
+  :deep(.el-steps) { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 4px; }
+  :deep(.el-step__title) { font-size: 11px; white-space: nowrap; }
+  /* 表单 */
+  :deep(.el-form-item__label) { width: 100% !important; float: none !important; text-align: left !important; padding: 0 0 4px; }
+  :deep(.el-form-item__content) { margin-left: 0 !important; }
+  /* 对话框 */
+  :deep(.el-dialog) { width: 100% !important; margin: 0 !important; border-radius: 16px 16px 0 0 !important; position: fixed !important; bottom: 0 !important; }
+  :deep(.el-dialog__body) { max-height: 60vh; overflow-y: auto; }
 }
-.item-time { font-size: 12px; color: #c0c4cc; margin-top: 8px; }
-.receiver-list { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
-.receiver-item { display: flex; align-items: center; }
-.receiver-name { font-weight: 500; }
-.field-tip { font-size: 12px; color: #909399; margin-top: 4px; }
-.loading-tip { font-size: 13px; color: #909399; padding: 8px 0; }
-.radio-hint { font-size: 12px; color: #909399; }
-.view-content {
-  font-size: 15px; line-height: 1.9; white-space: pre-wrap; color: #333;
-  padding: 12px; background: #fafafa; border-radius: 6px;
-  max-height: 60vh; overflow-y: auto;
-}
+
 </style>

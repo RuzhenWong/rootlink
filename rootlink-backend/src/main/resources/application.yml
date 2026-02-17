@@ -120,10 +120,4 @@ app:
     avatar-dir: uploads/avatars/
     avatar-base-url: /uploads/avatars/
 
-# 腾讯云 COS
-cos:
-  secret-id: **** # 按实际 secret-id 填写
-  secret-key: **** # 按实际 secret-key 填写
-  bucket: **** # 按实际 bucket 所在地域修改
-  region: ap-guangzhou      # 按实际 bucket 所在地域修改
-  base-url: **** # 据实填写
+

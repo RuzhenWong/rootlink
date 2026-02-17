@@ -106,4 +106,16 @@ const maritalLabel= m => ({1:'未婚',2:'已婚',3:'离异',4:'丧偶'})[m] ?? '
 .dr-tags     { display: flex; flex-wrap: wrap; gap: 5px; }
 .desc-block  { margin-top: 4px; }
 .empty-tip   { text-align: center; color: #c0c4cc; font-size: 13px; margin-top: 24px; }
+
+@media (max-width: 768px) {
+  /* Drawer 从底部弹出 */
+  :deep(.el-drawer) {
+    width: 100% !important;
+    height: 85vh !important;
+    border-radius: 20px 20px 0 0 !important;
+  }
+  .drawer-wrap { padding: 4px 0 16px; }
+  .dr-name { font-size: 16px; }
+}
+
 </style>
