@@ -47,7 +47,7 @@
 
       <!-- Tab2: 搜索添加 -->
       <el-tab-pane label="搜索添加" name="search">
-        <p class="search-tip"><el-icon><InfoFilled /></el-icon>通过身份证号精确搜索，对方需已实名且开启"允许被搜索"</p>
+        <p class="search-tip"><el-icon><InfoFilled /></el-icon>通过身份证号精确搜索，对方需已实名且开启「允许被搜索」</p>
         <el-form inline @submit.prevent="handleSearch">
           <el-form-item label="身份证号">
             <el-input v-model="searchForm.idCard" placeholder="请输入对方身份证号" style="width:240px" clearable />
@@ -92,11 +92,21 @@
               <div class="apply-left">
                 <el-avatar :size="40" icon="UserFilled" />
                 <div>
-                  <div class="apply-name">{{ apply.applicantName }}
-                    <el-tag size="small" type="primary">{{ apply.relationDesc }}</el-tag>
+                  <!-- 清晰展示：谁申请、成为我的什么、以及对方视角 -->
+                  <div class="apply-name">
+                    <span class="apply-who">{{ apply.applicantName }}</span>
+                    申请成为您的
+                    <el-tag size="small" type="primary" style="vertical-align:middle">
+                      {{ apply.myRoleDesc }}
+                    </el-tag>
                   </div>
-                  <div class="apply-sub">{{ apply.applicantPhone }}</div>
-                  <div v-if="apply.reason" class="apply-reason">留言：{{ apply.reason }}</div>
+                  <div class="apply-sub-detail">
+                    <span class="apply-sub">{{ apply.applicantPhone }}</span>
+                    <!-- apply.relationDesc = 申请人对您的称谓（A叫您什么）
+                         apply.myRoleDesc   = 您对申请人的称谓（您叫A什么） -->
+                    <span class="apply-self-view">（TA 将称您为「{{ apply.relationDesc }}」）</span>
+                  </div>
+                  <div v-if="apply.reason" class="apply-reason">💬 {{ apply.reason }}</div>
                   <div class="apply-time">{{ fmt(apply.createTime) }}</div>
                 </div>
               </div>
@@ -112,11 +122,17 @@
 
     </el-tabs>
 
-    <!-- ═══ 申请关系对话框 - 步骤链选择 ═══ -->
-    <el-dialog v-model="applyDialogVisible" title="建立亲属关系" width="540px" :close-on-click-modal="false">
-      <el-form label-width="90px">
-        <el-form-item label="目标用户">
-          <strong>{{ applyForm.targetName }}</strong>（{{ applyForm.targetPhone }}）
+    <!-- ═══ 申请关系对话框 ═══ -->
+    <el-dialog v-model="applyDialogVisible" title="建立亲属关系" width="560px" :close-on-click-modal="false">
+      <div class="apply-guide">
+        <el-icon color="#5A67F2"><InfoFilled /></el-icon>
+        <span>请从「我」的视角选择：<strong>对方（{{ applyForm.targetName }}）是我的什么人</strong></span>
+      </div>
+
+      <el-form label-width="90px" style="margin-top:16px">
+        <el-form-item label="对方信息">
+          <strong>{{ applyForm.targetName }}</strong>
+          <span style="color:var(--c-txt-s);margin-left:6px">{{ applyForm.targetPhone }}</span>
         </el-form-item>
 
         <el-form-item label="关系路径" required>
@@ -125,39 +141,47 @@
             <div class="chain-steps">
               <el-tag v-for="(s, i) in chainSteps" :key="i" closable
                 type="primary" size="large" @close="removeStep(i)"
-                style="margin-right:4px; font-size:13px; cursor:default">
+                style="margin-right:4px; font-size:13px">
                 {{ stepLabel(s) }}
               </el-tag>
-              <span v-if="chainSteps.length === 0" class="chain-placeholder">请从下方选择关系步骤</span>
-              <span v-if="chainSteps.length > 0" class="chain-arrow"> → </span>
-              <el-tag v-if="chainSteps.length > 0" type="success" size="large"
-                style="font-size:13px; font-weight:700">
-                {{ computedRelationName || '？' }}
-              </el-tag>
+              <span v-if="chainSteps.length === 0" class="chain-placeholder">请从下方点击选择</span>
             </div>
 
             <!-- 可选步骤按钮 -->
             <div v-if="availableNext.length > 0" class="chain-options">
-              <span class="options-label">{{ chainSteps.length === 0 ? '第一步：' : '继续选：' }}</span>
+              <span class="options-label">{{ chainSteps.length === 0 ? '选择第一步：' : '继续选：' }}</span>
               <el-button v-for="opt in availableNext" :key="opt.value"
-                size="small" :type="chainSteps.length === 0 ? 'primary' : 'default'"
-                plain @click="addStep(opt.value)" style="margin:2px">
+                size="small" type="primary" plain
+                @click="addStep(opt.value)" style="margin:2px">
                 {{ opt.label }}
               </el-button>
             </div>
             <div v-else-if="chainSteps.length > 0" class="chain-done">
-              <el-icon color="#67c23a"><CircleCheck /></el-icon> 关系路径已完整，或点 ✕ 删除最后一步继续调整
+              <el-icon color="#67c23a"><CircleCheck /></el-icon>
+              路径已完整，点 ✕ 可删除最后一步
             </div>
 
-            <!-- 清空 -->
             <el-button v-if="chainSteps.length > 0" link type="info" size="small"
               style="margin-top:6px" @click="chainSteps = []">清空重选</el-button>
           </div>
         </el-form-item>
 
-        <el-form-item label="关系描述">
-          <el-alert v-if="chainSteps.length > 0" :title="chainToDescription(chainSteps)"
-            type="info" :closable="false" show-icon />
+        <!-- 关系确认（双视角展示） -->
+        <el-form-item v-if="chainSteps.length > 0" label="关系确认">
+          <div class="relation-confirm">
+            <div class="confirm-row">
+              <span class="confirm-label">我的视角：</span>
+              <span>对方（{{ applyForm.targetName }}）是我的
+                <strong class="confirm-name">「{{ computedRelationName || '？' }}」</strong>
+              </span>
+            </div>
+            <div v-if="computedReverseDesc" class="confirm-row confirm-reverse">
+              <span class="confirm-label">对方视角：</span>
+              <span>申请通过后，对方会看到「我是 TA 的
+                <strong class="confirm-name-rev">{{ computedReverseDesc }}</strong>」
+              </span>
+            </div>
+          </div>
         </el-form-item>
 
         <el-form-item label="申请留言">
@@ -169,7 +193,9 @@
         <el-button @click="applyDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="applying"
           :disabled="!computedRelationName || computedRelationName === '亲属'"
-          @click="submitApply">提交申请</el-button>
+          @click="submitApply">
+          确认申请（{{ computedRelationName || '请先选择关系' }}）
+        </el-button>
       </template>
     </el-dialog>
 
@@ -245,7 +271,79 @@ const chainSteps = ref([])
 const availableNext = computed(() => nextStepOptions(chainSteps.value))
 const computedRelationName = computed(() => chainToName(chainSteps.value))
 
-const stepLabelMap = { '父':'父亲','母':'母亲','子':'儿子','女':'女儿','配偶':'配偶','哥':'哥哥','弟':'弟弟','姐':'姐姐','妹':'妹妹' }
+// 对方视角的关系描述（我是对方的什么）
+// 前端粗略反转，仅用于展示预览；实际存储时后端用性别做精确反转
+const computedReverseDesc = computed(() => {
+  if (!chainSteps.value.length) return ''
+  const name = computedRelationName.value
+  if (!name || name === '亲属') return ''
+  // 逆向称谓：「对方看到的我是 TA 的什么」
+  const reverseMap = {
+    // 直系
+    '父亲': '儿子/女儿', '母亲': '儿子/女儿',
+    '儿子': '父亲/母亲', '女儿': '父亲/母亲',
+    // 祖辈
+    '爷爷': '孙子/孙女', '奶奶': '孙子/孙女',
+    '外公': '外孙/外孙女', '外婆': '外孙/外孙女',
+    '太爷爷': '重孙子/重孙女', '太奶奶': '重孙子/重孙女',
+    '太外公': '重孙子/重孙女', '太外婆': '重孙子/重孙女',
+    // 孙辈
+    '孙子': '爷爷/奶奶', '孙女': '爷爷/奶奶',
+    '外孙': '外公/外婆', '外孙女': '外公/外婆',
+    '重孙子': '太爷爷/太奶奶', '重孙女': '太爷爷/太奶奶',
+    // 配偶
+    '配偶': '配偶',
+    // 兄弟姐妹
+    '哥哥': '弟弟/妹妹', '姐姐': '弟弟/妹妹',
+    '弟弟': '哥哥/姐姐', '妹妹': '哥哥/姐姐',
+    // 父辈旁系
+    '伯父': '侄子/侄女', '叔叔': '侄子/侄女',
+    '姑姑': '侄子/侄女', '姑父': '侄媳/外甥媳',
+    '舅舅': '外甥/外甥女', '舅妈': '外甥/外甥女',
+    '姨妈': '外甥/外甥女', '姨父': '外甥/外甥女',
+    '伯母': '侄子/侄女', '婶婶': '侄子/侄女',
+    // 堂/表
+    '堂兄': '堂弟/堂妹', '堂弟': '堂兄/堂姐',
+    '堂姐': '堂弟/堂妹', '堂妹': '堂兄/堂姐',
+    '表哥': '表弟/表妹', '表弟': '表哥/表姐',
+    '表姐': '表弟/表妹', '表妹': '表哥/表姐',
+    // 兄弟姐妹的配偶
+    '嫂子': '小叔子/小姑子', '弟媳': '大伯子/小姑子',
+    '姐夫': '妻弟/妻妹', '妹夫': '妻兄/妻姐',
+    // 子女的配偶
+    '儿媳': '公公/婆婆', '女婿': '岳父/岳母',
+    // 配偶的父母（2步路径的关键修复）
+    '岳父/公公': '儿婿/儿媳', '岳母/婆婆': '儿婿/儿媳',
+    '岳父': '女婿/儿媳', '公公': '儿媳/女婿',
+    '岳母': '女婿', '婆婆': '儿媳',
+    // 配偶的兄弟姐妹
+    '大舅子/大伯子': '妹妹/妻妹', '小舅子/小叔子': '妹妹/妻妹',
+    '大姨子/大姑子': '兄弟/妻兄', '小姨子/小姑子': '兄弟/妻兄',
+    '大舅子': '妻妹', '小舅子': '妻妹',
+    '大姨子': '妻兄', '小姨子': '妻兄',
+    '大伯子': '弟媳', '小叔子': '弟媳',
+    '大姑子': '弟弟', '小姑子': '弟弟',
+    // 继父母
+    '继父': '继子/继女', '继母': '继子/继女',
+    // 继子女
+    '继子': '继父/继母', '继女': '继父/继母',
+    // 孙媳孙婿
+    '孙媳': '祖父/祖母', '孙女婿': '祖父/祖母',
+    // 亲家
+    '亲家公': '亲家公/亲家母', '亲家母': '亲家公/亲家母',
+    // 表叔表姑
+    '表叔': '表侄/表侄女', '表姑': '表侄/表侄女',
+    // 侄孙辈
+    '侄子': '伯父/叔叔/姑父（女性视角：伯母/婶婶/姑姑）', '侄女': '伯父/叔叔',
+    '外甥': '舅舅/姨妈', '外甥女': '舅舅/姨妈',
+  }
+  return reverseMap[name] || null
+})
+
+const stepLabelMap = {
+  '父': '父亲', '母': '母亲', '子': '儿子', '女': '女儿',
+  '配偶': '配偶', '哥': '哥哥', '弟': '弟弟', '姐': '姐姐', '妹': '妹妹',
+}
 const stepLabel = v => stepLabelMap[v] || v
 
 const addStep = (v) => { chainSteps.value = [...chainSteps.value, v] }
@@ -273,7 +371,7 @@ const submitApply = async () => {
       relationChain: JSON.stringify(chainSteps.value),
       reason: applyForm.value.reason,
     })
-    ElMessage.success(`申请已发送，对方确认后建立【${computedRelationName.value}】关系`)
+    ElMessage.success(`申请已发送！对方确认后，TA 将成为您的「${computedRelationName.value}」`)
     applyDialogVisible.value = false
     if (searchResult.value) searchResult.value.relationStatus = 'pending'
   } catch (e) { console.error(e) }
@@ -299,7 +397,7 @@ const handleAccept = async (apply) => {
   handlingId.value = apply.applyId
   try {
     await relationApi.handleApply(apply.applyId, { action: 1 })
-    ElMessage.success('已同意，系统正在推断关联关系...')
+    ElMessage.success('已同意！系统正在推断关联关系...')
     pendingApplies.value = pendingApplies.value.filter(a => a.applyId !== apply.applyId)
     loadRelations()
     setTimeout(() => loadRelations(), 2000)
@@ -329,8 +427,8 @@ const onTabChange = (name) => {
   if (name === 'pending') loadPendingApplies()
 }
 
-const lifeTagType = s => ({0:'success',1:'info',2:'warning',3:'danger'})[s] ?? 'info'
-const lifeLabel   = s => ({0:'活跃',1:'不活跃',2:'疑似离世',3:'已离世'})[s] ?? '未知'
+const lifeTagType = s => ({ 0: 'success', 1: 'info', 2: 'warning', 3: 'danger' })[s] ?? 'info'
+const lifeLabel   = s => ({ 0: '活跃', 1: '不活跃', 2: '疑似离世', 3: '已离世' })[s] ?? '未知'
 const fmt = t => t ? new Date(t).toLocaleString('zh-CN') : '-'
 
 onMounted(() => { loadRelations(); loadPendingApplies() })
@@ -339,7 +437,7 @@ onMounted(() => { loadRelations(); loadPendingApplies() })
 <style scoped>
 .relation-page { max-width: 900px; }
 
-/* ── Tab 覆盖 ── */
+/* ── Tab ── */
 :deep(.el-tabs--border-card) {
   border-radius: var(--radius-md) !important;
   border: 1px solid var(--c-border) !important;
@@ -352,6 +450,7 @@ onMounted(() => { loadRelations(); loadPendingApplies() })
 
 .tab-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
 .tab-title { font-size: 13px; font-weight: 700; color: var(--c-txt-s); text-transform: uppercase; letter-spacing: .5px; }
+
 .search-tip {
   color: var(--c-txt-s); font-size: 13px; margin-bottom: 16px;
   display: flex; align-items: center; gap: 6px;
@@ -364,68 +463,80 @@ onMounted(() => { loadRelations(); loadPendingApplies() })
 .result-name { font-size: 16px; font-weight: 700; color: var(--c-txt); }
 .result-sub { font-size: 12px; color: var(--c-txt-s); margin: 3px 0; }
 
+/* ── 申请列表 ── */
 .apply-list { display: flex; flex-direction: column; gap: 10px; }
 .apply-card { border: 1px solid var(--c-border) !important; border-radius: var(--radius-md) !important; }
 .apply-row { display: flex; justify-content: space-between; align-items: center; }
 .apply-left { display: flex; gap: 12px; align-items: flex-start; }
-.apply-name { font-size: 14px; font-weight: 700; color: var(--c-txt); margin-bottom: 4px; }
+.apply-name {
+  font-size: 14px; font-weight: 600; color: var(--c-txt);
+  margin-bottom: 4px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+}
+.apply-who { color: var(--c-primary); font-weight: 700; }
+.apply-sub-detail { display: flex; align-items: center; gap: 8px; margin: 2px 0; }
 .apply-sub { font-size: 12px; color: var(--c-txt-s); }
+.apply-self-view { font-size: 11px; color: var(--c-txt-i); }
 .apply-reason { font-size: 12px; color: var(--c-txt-s); margin-top: 2px; }
 .apply-time { font-size: 11px; color: var(--c-txt-i); margin-top: 3px; }
-.apply-btns { display: flex; gap: 8px; }
+.apply-btns { display: flex; gap: 8px; flex-shrink: 0; }
+
+/* ── 申请对话框 ── */
+.apply-guide {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border-radius: var(--radius-sm);
+  background: rgba(90,103,242,.06); border-left: 3px solid var(--c-primary);
+  font-size: 13px; color: var(--c-txt-s);
+}
+.apply-guide strong { color: var(--c-primary); }
 
 /* ── 步骤链构建器 ── */
 .chain-builder { display: flex; flex-direction: column; gap: 10px; }
 .chain-steps {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   min-height: 40px; padding: 8px 12px;
-  background: #F8FAFC;
-  border-radius: var(--radius-sm);
-  border: 1.5px dashed var(--c-border);
-  transition: border-color .2s;
+  background: #F8FAFC; border-radius: var(--radius-sm);
+  border: 1.5px dashed var(--c-border); transition: border-color .2s;
 }
-.chain-steps:focus-within { border-color: var(--c-primary); }
 .chain-placeholder { color: var(--c-txt-i); font-size: 13px; }
-.chain-arrow { color: var(--c-txt-i); font-weight: 700; margin: 0 4px; font-size: 16px; }
 .chain-options { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
 .options-label { font-size: 12px; color: var(--c-txt-s); margin-right: 2px; font-weight: 600; }
 .chain-done { font-size: 13px; color: var(--c-success); display: flex; align-items: center; gap: 5px; font-weight: 600; }
 
+/* ── 关系确认 ── */
+.relation-confirm {
+  background: #F0F4FF; border: 1px solid rgba(90,103,242,.2);
+  border-radius: var(--radius-sm); padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.confirm-row { font-size: 13px; color: var(--c-txt); display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.confirm-reverse { color: var(--c-txt-s); }
+.confirm-label { font-size: 12px; color: var(--c-txt-i); min-width: 68px; }
+.confirm-name { color: var(--c-primary); font-size: 15px; }
+.confirm-name-rev { color: var(--c-success, #67c23a); }
+
+/* ── 响应式 ── */
 @media (max-width: 768px) {
   .relation-page { max-width: 100%; }
-  /* Tab 横滚 */
   :deep(.el-tabs__nav) { flex-wrap: nowrap; }
   :deep(.el-tabs__item) { font-size: 12px !important; padding: 0 10px !important; }
-  /* 表格横滚 */
   :deep(.el-table) { font-size: 13px; }
-  :deep(.el-table__header th) { padding: 8px 0 !important; }
-  :deep(.el-table__body td)  { padding: 6px 0 !important; }
   .tab-header { flex-direction: column; align-items: flex-start; gap: 10px; }
-  /* 搜索栏 */
   :deep(.el-form--inline .el-form-item) { flex-direction: column; width: 100%; }
   :deep(.el-form--inline .el-input) { width: 100% !important; }
   .search-result { max-width: 100%; }
   .result-info { flex-wrap: wrap; gap: 10px; }
-  /* 申请卡片 */
   .apply-row { flex-direction: column; gap: 12px; align-items: flex-start; }
   .apply-btns { width: 100%; }
   .apply-btns .el-button { flex: 1; }
-  /* 链式构建器 */
-  .chain-options { gap: 6px; }
-  :deep(.el-dialog) { margin: 0 !important; width: 100% !important; border-radius: 16px 16px 0 0 !important; position: fixed !important; bottom: 0 !important; }
-  :deep(.el-dialog__body) { max-height: 65vh; overflow-y: auto; }
-}
-@media (max-width: 480px) {
-  :deep(.el-table-column--selection .el-checkbox) { display: none; }
+  :deep(.el-dialog) {
+    margin: 0 !important; width: 100% !important;
+    border-radius: 16px 16px 0 0 !important;
+    position: fixed !important; bottom: 0 !important;
+  }
+  :deep(.el-dialog__body) { max-height: 70vh; overflow-y: auto; }
 }
 @media (max-width: 640px) {
-  /* 手机上隐藏"确认时间"列 */
   :deep(.col-confirm-time) { display: none !important; }
   :deep(.col-confirm-time *) { display: none !important; }
-  /* 搜索输入框全宽 */
-  :deep(.el-form--inline .el-input__inner) { font-size: 14px; }
-  /* 亲属列表改卡片样式 */
-  :deep(.el-table__row) { cursor: pointer; }
 }
-
 </style>

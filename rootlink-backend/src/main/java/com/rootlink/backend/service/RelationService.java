@@ -546,17 +546,33 @@ public class RelationService {
     public void removeRelation(Long userId, Long relationId) {
         UserRelation rel = relationMapper.selectById(relationId);
         if (rel == null || !rel.getUserId().equals(userId)) throw new BusinessException(403, "无权操作");
-        // 删 MySQL（双向）
-        LambdaQueryWrapper<UserRelation> w = new LambdaQueryWrapper<>();
-        w.and(q -> q
-            .eq(UserRelation::getUserId, userId)
-            .eq(UserRelation::getRelatedUserId, rel.getRelatedUserId())
-            .or()
-            .eq(UserRelation::getUserId, rel.getRelatedUserId())
-            .eq(UserRelation::getRelatedUserId, userId));
-        relationMapper.delete(w);
+
+        // 只删除手动确认的关系（inferStatus=0），推断关系单独清理
+        // 避免"解除关系"时连带删掉推断记录
+        LambdaQueryWrapper<UserRelation> manual = new LambdaQueryWrapper<>();
+        manual.and(q -> q
+                .eq(UserRelation::getUserId, userId)
+                .eq(UserRelation::getRelatedUserId, rel.getRelatedUserId())
+                .or()
+                .eq(UserRelation::getUserId, rel.getRelatedUserId())
+                .eq(UserRelation::getRelatedUserId, userId))
+              .eq(UserRelation::getInferStatus, 0);  // 只删手动确认的
+        int manualDeleted = (int) relationMapper.delete(manual);
+
+        // 同时清除两人之间所有推断关系（推断基于原手动关系，手动删了就无效了）
+        LambdaQueryWrapper<UserRelation> inferred = new LambdaQueryWrapper<>();
+        inferred.and(q -> q
+                .eq(UserRelation::getUserId, userId)
+                .eq(UserRelation::getRelatedUserId, rel.getRelatedUserId())
+                .or()
+                .eq(UserRelation::getUserId, rel.getRelatedUserId())
+                .eq(UserRelation::getRelatedUserId, userId))
+                .eq(UserRelation::getInferStatus, 2);  // 只删推断
+        relationMapper.delete(inferred);
+
         // 删 Nebula 边
         nebulaUtil.removeRelationFromGraph(userId, rel.getRelatedUserId());
+        log.info("[解除关系] userId={}, relatedId={}, 删除手动{}条", userId, rel.getRelatedUserId(), manualDeleted);
     }
 
     // ═══════════════════════════════════════════════════
@@ -650,7 +666,70 @@ public class RelationService {
         Map<String, Object> result = new HashMap<>();
         result.put("nodes", nodes);
         result.put("edges", edges);
+
+        // ── Step4: 修复僵尸推断记录（异步，不阻塞返回） ──
+        fixStaleInferredRelations(currentUserId);
+
+        // ── Step5: 静默自动补全遗漏的推断关系 ──
+        // 仅在网络规模适中时触发（避免大网络每次加载都跑推断）
+        if (visited.size() <= 30 && nebulaUtil.isAvailable()) {
+            autoFillMissingInference(currentUserId, visited);
+        }
+
         return result;
+    }
+
+    /**
+     * 自动补全遗漏的推断关系
+     * 策略：遍历网络内每条手动确认边，检查其对端节点之间是否已有关系，
+     * 若没有则触发推断（异步，不阻塞接口返回）
+     */
+    @Async
+    public void autoFillMissingInference(Long originUserId, Set<Long> networkNodes) {
+        try {
+            // 收集手动确认边（去重无方向）
+            Set<String> seenEdges = new HashSet<>();
+            List<Long[]> manualPairs = new ArrayList<>();
+            for (Long uid : networkNodes) {
+                LambdaQueryWrapper<UserRelation> w = new LambdaQueryWrapper<>();
+                w.eq(UserRelation::getUserId, uid)
+                 .eq(UserRelation::getInferStatus, 0)   // 仅手动确认边
+                 .eq(UserRelation::getConfirmStatus, 1)
+                 .in(UserRelation::getRelatedUserId, networkNodes)
+                 .eq(UserRelation::getDeleted, 0);
+                for (UserRelation r : relationMapper.selectList(w)) {
+                    Long a = uid, b = r.getRelatedUserId();
+                    String key = Math.min(a, b) + "_" + Math.max(a, b);
+                    if (seenEdges.add(key)) manualPairs.add(new Long[]{a, b});
+                }
+            }
+            // 对每条手动边，检查其邻居对之间是否有遗漏的推断
+            for (Long[] pair : manualPairs) {
+                Long a = pair[0], b = pair[1];
+                // A的所有邻居 与 B 之间
+                Set<Long> aNeighbors = nebulaUtil.findNeighbors(a, 1);
+                aNeighbors.remove(b); aNeighbors.remove(a);
+                for (Long c : aNeighbors) {
+                    if (!hasRelation(c, b)) {
+                        triggerInferenceByGraph(c, b);
+                        triggerInferenceByGraph(b, c);
+                    }
+                }
+                // B的所有邻居 与 A 之间
+                Set<Long> bNeighbors = nebulaUtil.findNeighbors(b, 1);
+                bNeighbors.remove(a); bNeighbors.remove(b);
+                for (Long c : bNeighbors) {
+                    if (!hasRelation(c, a)) {
+                        triggerInferenceByGraph(c, a);
+                        triggerInferenceByGraph(a, c);
+                    }
+                }
+            }
+            log.info("[自动补全] 完成，起点={}, 网络大小={}, 检查边数={}",
+                     originUserId, networkNodes.size(), manualPairs.size());
+        } catch (Exception e) {
+            log.warn("[自动补全] 异常（不影响主流程）: {}", e.getMessage());
+        }
     }
 
     public List<Map<String, Object>> getPendingApplies(Long userId) {
@@ -669,7 +748,24 @@ public class RelationService {
             item.put("applyId", a.getId());
             item.put("applicantUserId", a.getApplicantUserId());
             item.put("relationType", a.getRelationType());
+            // relationDesc = 申请人视角（对方/target 是申请人的什么）
             item.put("relationDesc", a.getRelationDesc());
+            // myRoleDesc = target视角（申请人将成为 target 的什么）→ 逆向链解析
+            try {
+                String chainJson = extractChainFromApply(a);
+                if (chainJson != null) {
+                    List<String> fwdChain = inferUtil.jsonToChain(chainJson);
+                    Integer gApplicant = getGender(a.getApplicantUserId());
+                    Integer gTarget = getGender(userId); // userId = 当前用户(target)
+                    List<String> revChain = inferUtil.reverseChainWithGender(fwdChain, gApplicant, gTarget);
+                    String myRoleDesc = inferUtil.resolveChain(revChain);
+                    item.put("myRoleDesc", myRoleDesc); // 申请人将成为我的 myRoleDesc
+                } else {
+                    item.put("myRoleDesc", a.getRelationDesc());
+                }
+            } catch (Exception e) {
+                item.put("myRoleDesc", a.getRelationDesc());
+            }
             String cleanReason = a.getReason() != null && a.getReason().startsWith("[CHAIN]")
                     ? a.getReason().replaceFirst("\\[CHAIN]\\S*\\s?", "") : a.getReason();
             item.put("reason", cleanReason);
@@ -729,11 +825,46 @@ public class RelationService {
     /** 保存推断关系，返回是否新建成功（已存在返回 false）*/
     private boolean saveInferredRelation(Long fromUser, Long toUser, String kinship) {
         if (kinship == null || "亲属".equals(kinship)) return false;
-        LambdaQueryWrapper<UserRelation> check = new LambdaQueryWrapper<>();
-        check.eq(UserRelation::getUserId, fromUser)
-             .eq(UserRelation::getRelatedUserId, toUser)
-             .eq(UserRelation::getDeleted, 0);
-        if (relationMapper.selectCount(check) > 0) return false;
+
+        // 优先检查手动确认的关系（inferStatus=0）：有手动关系则绝不用推断覆盖
+        LambdaQueryWrapper<UserRelation> manualCheck = new LambdaQueryWrapper<>();
+        manualCheck.eq(UserRelation::getUserId, fromUser)
+                   .eq(UserRelation::getRelatedUserId, toUser)
+                   .eq(UserRelation::getInferStatus, 0)
+                   .eq(UserRelation::getConfirmStatus, 1)
+                   .eq(UserRelation::getDeleted, 0);
+        if (relationMapper.selectCount(manualCheck) > 0) {
+            log.debug("[推断跳过] 已有手动关系: from={}, to={}", fromUser, toUser);
+            return false;
+        }
+
+        // 检查是否已有推断记录（避免重复插入）
+        LambdaQueryWrapper<UserRelation> inferCheck = new LambdaQueryWrapper<>();
+        inferCheck.eq(UserRelation::getUserId, fromUser)
+                  .eq(UserRelation::getRelatedUserId, toUser)
+                  .eq(UserRelation::getInferStatus, 2)
+                  .eq(UserRelation::getConfirmStatus, 1)
+                  .eq(UserRelation::getDeleted, 0);
+        if (relationMapper.selectCount(inferCheck) > 0) return false;
+
+        // 检查是否存在僵尸推断记录（confirmStatus=0）→ 直接升级，不重复插入
+        LambdaQueryWrapper<UserRelation> zombie = new LambdaQueryWrapper<>();
+        zombie.eq(UserRelation::getUserId, fromUser)
+              .eq(UserRelation::getRelatedUserId, toUser)
+              .eq(UserRelation::getInferStatus, 2)   // 只找推断类型的僵尸
+              .eq(UserRelation::getConfirmStatus, 0)
+              .eq(UserRelation::getDeleted, 0)
+              .last("LIMIT 1");
+        UserRelation existing = relationMapper.selectOne(zombie);
+        if (existing != null) {
+            existing.setInferStatus(2);
+            existing.setConfirmStatus(1);
+            existing.setRelationDesc(kinship);
+            existing.setConfirmTime(LocalDateTime.now());
+            relationMapper.updateById(existing);
+            log.info("[推断] 升级僵尸推断记录: from={}, to={}, kinship={}", fromUser, toUser, kinship);
+            return true;
+        }
 
         UserRelation rel = new UserRelation();
         rel.setUserId(fromUser);
@@ -741,11 +872,11 @@ public class RelationService {
         rel.setRelationType(99);
         rel.setRelationDesc(kinship);
         rel.setRelationChain("[]");
-        rel.setInferStatus(2);           // 2=推断已自动确认（不再需要手动点确认）
-        rel.setConfirmStatus(1);         // 直接进入已确认列表，各用户均可见
+        rel.setInferStatus(2);
+        rel.setConfirmStatus(1);
         rel.setConfirmTime(LocalDateTime.now());
         relationMapper.insert(rel);
-        log.info("[推断] 新增已自动确认关系: from={}, to={}, kinship={}", fromUser, toUser, kinship);
+        log.info("[推断] 新增自动确认关系: from={}, to={}, kinship={}", fromUser, toUser, kinship);
         return true;
     }
 
@@ -753,8 +884,135 @@ public class RelationService {
         LambdaQueryWrapper<UserRelation> w = new LambdaQueryWrapper<>();
         w.eq(UserRelation::getUserId, userId)
          .eq(UserRelation::getRelatedUserId, relatedUserId)
+         .eq(UserRelation::getConfirmStatus, 1)   // 只算已确认的关系
          .eq(UserRelation::getDeleted, 0);
         return relationMapper.selectCount(w) > 0;
+    }
+
+    /**
+     * 修复历史遗留问题：
+     * 1. 升级僵尸记录（infer_status=1, confirmStatus=0 → infer_status=2, confirmStatus=1）
+     * 2. 补全单向推断（A→B 有但 B→A 没有时，推算 B→A 的称谓并补存）
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public int fixStaleInferredRelations(Long userId) {
+        // 找当前用户网络内所有僵尸记录
+        Set<Long> networkNodes = new LinkedHashSet<>();
+        networkNodes.add(userId);
+        Queue<Long> q = new LinkedList<>();
+        q.add(userId);
+        while (!q.isEmpty()) {
+            Long uid = q.poll();
+            LambdaQueryWrapper<UserRelation> w = new LambdaQueryWrapper<>();
+            w.eq(UserRelation::getUserId, uid)
+             .eq(UserRelation::getConfirmStatus, 1)
+             .eq(UserRelation::getDeleted, 0);
+            for (UserRelation r : relationMapper.selectList(w)) {
+                if (networkNodes.add(r.getRelatedUserId())) q.add(r.getRelatedUserId());
+            }
+        }
+        if (networkNodes.size() <= 1) return 0;
+
+        // 查找网络内所有僵尸记录（infer_status=1 or confirmStatus=0 的推断记录）
+        int fixed = 0;
+        for (Long uid : networkNodes) {
+            LambdaQueryWrapper<UserRelation> stale = new LambdaQueryWrapper<>();
+            stale.eq(UserRelation::getUserId, uid)
+                 .eq(UserRelation::getInferStatus, 1)      // 旧式待确认推断
+                 .eq(UserRelation::getConfirmStatus, 0)
+                 .eq(UserRelation::getDeleted, 0);
+            List<UserRelation> staleList = relationMapper.selectList(stale);
+            for (UserRelation r : staleList) {
+                r.setInferStatus(2);
+                r.setConfirmStatus(1);
+                r.setConfirmTime(LocalDateTime.now());
+                relationMapper.updateById(r);
+                fixed++;
+            }
+        }
+        if (fixed > 0) log.info("[修复僵尸推断] 升级 {} 条僵尸记录为自动确认", fixed);
+
+        // ── Step2: 补全单向推断（有A→B但B→A缺失）──────────────────────
+        // 遍历网络内所有已确认推断关系，若反向缺失则推算并补存
+        int fillCount = 0;
+        for (Long uid : networkNodes) {
+            LambdaQueryWrapper<UserRelation> inferQuery = new LambdaQueryWrapper<>();
+            inferQuery.eq(UserRelation::getUserId, uid)
+                     .eq(UserRelation::getInferStatus, 2)
+                     .eq(UserRelation::getConfirmStatus, 1)
+                     .eq(UserRelation::getDeleted, 0);
+            for (UserRelation r : relationMapper.selectList(inferQuery)) {
+                Long otherUid = r.getRelatedUserId();
+                // 检查反向是否存在
+                if (!hasRelation(otherUid, uid)) {
+                    // 推算反向称谓
+                    try {
+                        String fwdDesc = r.getRelationDesc();
+                        String fwdChain = r.getRelationChain();
+                        Integer gUid   = getGender(uid);
+                        Integer gOther = getGender(otherUid);
+                        List<String> chain = inferUtil.jsonToChain(fwdChain);
+                        List<String> revChain = inferUtil.reverseChainWithGender(chain, gUid, gOther);
+                        String revDesc = inferUtil.resolveChain(revChain);
+                        if (revDesc != null && !revDesc.isEmpty() && !"亲属".equals(revDesc)) {
+                            boolean ok = saveInferredRelation(otherUid, uid, revDesc);
+                            if (ok) fillCount++;
+                        } else {
+                            // chain 为空或无法解析，用简单逆向 Map 推算
+                            String guessed = guessReverseDesc(fwdDesc, gUid);
+                            if (guessed != null) {
+                                boolean ok = saveInferredRelation(otherUid, uid, guessed);
+                                if (ok) fillCount++;
+                            }
+                        }
+                    } catch (Exception ex) {
+                        log.warn("[补全推断] 异常: from={}, to={}, err={}", uid, otherUid, ex.getMessage());
+                    }
+                }
+            }
+        }
+        if (fillCount > 0) log.info("[补全推断] 补全单向推断 {} 条", fillCount);
+        return fixed + fillCount;
+    }
+
+    /**
+     * 简单逆向称谓推算（用于 chain 为空时的降级方案）
+     */
+    private String guessReverseDesc(String desc, Integer myGender) {
+        if (desc == null) return null;
+        Map<String, String[]> m = new LinkedHashMap<>();
+        m.put("父亲",  new String[]{"儿子","女儿"});
+        m.put("母亲",  new String[]{"儿子","女儿"});
+        m.put("儿子",  new String[]{"父亲","母亲"});
+        m.put("女儿",  new String[]{"父亲","母亲"});
+        m.put("爷爷",  new String[]{"孙子","孙女"});
+        m.put("奶奶",  new String[]{"孙子","孙女"});
+        m.put("外公",  new String[]{"外孙","外孙女"});
+        m.put("外婆",  new String[]{"外孙","外孙女"});
+        m.put("孙子",  new String[]{"爷爷","奶奶"});
+        m.put("孙女",  new String[]{"爷爷","奶奶"});
+        m.put("外孙",  new String[]{"外公","外婆"});
+        m.put("外孙女",new String[]{"外公","外婆"});
+        m.put("配偶",  new String[]{"配偶","配偶"});
+        m.put("儿媳",  new String[]{"公公","婆婆"});
+        m.put("女婿",  new String[]{"岳父","岳母"});
+        m.put("公公",  new String[]{"儿媳","儿媳"});
+        m.put("婆婆",  new String[]{"儿媳","儿媳"});
+        m.put("岳父",  new String[]{"女婿","女婿"});
+        m.put("岳母",  new String[]{"女婿","女婿"});
+        m.put("哥哥",  new String[]{"弟弟","妹妹"});
+        m.put("姐姐",  new String[]{"弟弟","妹妹"});
+        m.put("弟弟",  new String[]{"哥哥","姐姐"});
+        m.put("妹妹",  new String[]{"哥哥","姐姐"});
+        m.put("侄子",  new String[]{"伯父","舅舅"});
+        m.put("侄女",  new String[]{"伯父","舅舅"});
+        m.put("外甥",  new String[]{"舅舅","姨妈"});
+        m.put("外甥女",new String[]{"舅舅","姨妈"});
+        // 处理带斜杠的组合词（如"婆婆/岳母"）
+        String cleanDesc = desc.contains("/") ? desc.split("/")[0] : desc;
+        String[] rev = m.get(cleanDesc);
+        if (rev == null) return null;
+        return myGender != null && myGender == 2 ? rev[1] : rev[0];
     }
 
     private List<UserRelation> getConfirmedRelations(Long userId) {
@@ -853,6 +1111,9 @@ public class RelationService {
         if ("父".equals(first)) return 1;
         if ("母".equals(first)) return 2;
         if ("子".equals(first) || "女".equals(first)) return 4;
+        // 兄弟姐妹直接选择（哥/弟/姐/妹）也归为同辈类型
+        if ("哥".equals(first) || "弟".equals(first) ||
+            "姐".equals(first) || "妹".equals(first)) return 5;
         return 99;
     }
 

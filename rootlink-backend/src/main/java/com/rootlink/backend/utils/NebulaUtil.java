@@ -80,7 +80,11 @@ public class NebulaUtil {
             execute("CREATE TAG IF NOT EXISTS Person(name string,gender int,life_status int)");
             execute("CREATE EDGE IF NOT EXISTS PARENT_OF(parent_gender int,child_gender int)");
             execute("CREATE EDGE IF NOT EXISTS SPOUSE_OF()");
-            execute("CREATE EDGE IF NOT EXISTS SIBLING_OF()");
+            // seniority: 在 src->dst 边上，1=src比dst年长(src是哥/姐), 2=src比dst年幼(src是弟/妹), 0=未知
+            execute("CREATE EDGE IF NOT EXISTS SIBLING_OF(seniority int DEFAULT 0)");
+            // 若 SIBLING_OF 已存在但无 seniority 属性，尝试 ALTER 添加
+            try { execute("ALTER EDGE SIBLING_OF ADD (seniority int DEFAULT 0)"); }
+            catch (Exception alterEx) { log.debug("SIBLING_OF seniority 属性已存在，跳过 ALTER"); }
             Thread.sleep(1000);
             log.info("NebulaGraph Schema 初始化完成");
         } catch (Exception e) {
@@ -178,13 +182,13 @@ public class NebulaUtil {
             int gB = userBGender != null ? userBGender : 0;
 
             if ("父".equals(first) || "母".equals(first)) {
-                // B 是 A 的父/母 → B PARENT_OF A
+                // B 是 A 的父/母 → B PARENT_OF A（B是父母，src=B, dst=A）
                 execute(String.format(
                     "INSERT EDGE PARENT_OF(parent_gender,child_gender) VALUES %d->%d:(%d,%d)",
                     userBId, userAId, gB, gA));
 
             } else if ("子".equals(first) || "女".equals(first)) {
-                // B 是 A 的子/女 → A PARENT_OF B
+                // B 是 A 的子/女 → A PARENT_OF B（A是父母，src=A, dst=B）
                 execute(String.format(
                     "INSERT EDGE PARENT_OF(parent_gender,child_gender) VALUES %d->%d:(%d,%d)",
                     userAId, userBId, gA, gB));
@@ -194,10 +198,38 @@ public class NebulaUtil {
                     "INSERT EDGE SPOUSE_OF() VALUES %d->%d:(),%d->%d:()",
                     userAId, userBId, userBId, userAId));
 
-            } else if ("同辈".equals(first)) {
+            } else if ("哥".equals(first) || "姐".equals(first)) {
+                // B 是 A 的哥/姐（B比A年长）
+                // A->B: A是年幼的(seniority=2), B->A: B是年长的(seniority=1)
                 execute(String.format(
-                    "INSERT EDGE SIBLING_OF() VALUES %d->%d:(),%d->%d:()",
+                    "INSERT EDGE SIBLING_OF(seniority) VALUES %d->%d:(2),%d->%d:(1)",
                     userAId, userBId, userBId, userAId));
+
+            } else if ("弟".equals(first) || "妹".equals(first)) {
+                // B 是 A 的弟/妹（A比B年长）
+                // A->B: A是年长的(seniority=1), B->A: B是年幼的(seniority=2)
+                execute(String.format(
+                    "INSERT EDGE SIBLING_OF(seniority) VALUES %d->%d:(1),%d->%d:(2)",
+                    userAId, userBId, userBId, userAId));
+
+            } else if ("同辈".equals(first)) {
+                // 兼容旧的"同辈"前缀格式，从chain[2]判断B的辈分
+                String senType = chain.size() >= 3 ? chain.get(2) : "";
+                if ("哥".equals(senType) || "姐".equals(senType)) {
+                    // B比A年长：A->B seniority=2, B->A seniority=1
+                    execute(String.format(
+                        "INSERT EDGE SIBLING_OF(seniority) VALUES %d->%d:(2),%d->%d:(1)",
+                        userAId, userBId, userBId, userAId));
+                } else if ("弟".equals(senType) || "妹".equals(senType)) {
+                    // A比B年长：A->B seniority=1, B->A seniority=2
+                    execute(String.format(
+                        "INSERT EDGE SIBLING_OF(seniority) VALUES %d->%d:(1),%d->%d:(2)",
+                        userAId, userBId, userBId, userAId));
+                } else {
+                    execute(String.format(
+                        "INSERT EDGE SIBLING_OF(seniority) VALUES %d->%d:(0),%d->%d:(0)",
+                        userAId, userBId, userBId, userAId));
+                }
             }
             log.info("关系同步到 Nebula: A={} B={} chain={}", userAId, userBId, chain);
         } catch (Exception e) {

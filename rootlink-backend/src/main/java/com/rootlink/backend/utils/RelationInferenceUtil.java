@@ -125,6 +125,42 @@ public class RelationInferenceUtil {
         CHAIN_NAME_MAP.put("母,姐,女", "表姐妹");
         CHAIN_NAME_MAP.put("母,妹,子", "表兄弟");
         CHAIN_NAME_MAP.put("母,妹,女", "表姐妹");
+        // ---- 叔伯姑舅姨的配偶 ----
+        CHAIN_NAME_MAP.put("父,哥,配偶", "伯母");
+        CHAIN_NAME_MAP.put("父,弟,配偶", "婶婶");
+        CHAIN_NAME_MAP.put("父,姐,配偶", "姑父");
+        CHAIN_NAME_MAP.put("父,妹,配偶", "姑父");
+        CHAIN_NAME_MAP.put("母,哥,配偶", "舅妈");
+        CHAIN_NAME_MAP.put("母,弟,配偶", "舅妈");
+        CHAIN_NAME_MAP.put("母,姐,配偶", "姨父");
+        CHAIN_NAME_MAP.put("母,妹,配偶", "姨父");
+        // ---- 曾祖（太）辈 ----
+        CHAIN_NAME_MAP.put("父,父,父", "太爷爷");
+        CHAIN_NAME_MAP.put("父,父,母", "太奶奶");
+        CHAIN_NAME_MAP.put("母,母,父", "太外公");
+        CHAIN_NAME_MAP.put("母,母,母", "太外婆");
+        // ---- 重孙辈 ----
+        CHAIN_NAME_MAP.put("子,子,子", "重孙子");
+        CHAIN_NAME_MAP.put("子,子,女", "重孙女");
+        // ---- 亲家 ----
+        CHAIN_NAME_MAP.put("子,配偶,父", "亲家公");
+        CHAIN_NAME_MAP.put("子,配偶,母", "亲家母");
+        CHAIN_NAME_MAP.put("女,配偶,父", "亲家公");
+        CHAIN_NAME_MAP.put("女,配偶,母", "亲家母");
+        // ---- 爷爷的兄弟姐妹的子女 → 叔叔/姑姑（用户要求） ----
+        CHAIN_NAME_MAP.put("父,父,哥,子", "叔叔（堂叔）");
+        CHAIN_NAME_MAP.put("父,父,哥,女", "姑姑（堂姑）");
+        CHAIN_NAME_MAP.put("父,父,弟,子", "叔叔（堂叔）");
+        CHAIN_NAME_MAP.put("父,父,弟,女", "姑姑（堂姑）");
+        // ---- 奶奶的兄弟姐妹的子女 → 表叔/表姑 ----
+        CHAIN_NAME_MAP.put("父,母,哥,子", "表叔");
+        CHAIN_NAME_MAP.put("父,母,哥,女", "表姑");
+        CHAIN_NAME_MAP.put("父,母,弟,子", "表叔");
+        CHAIN_NAME_MAP.put("父,母,弟,女", "表姑");
+        CHAIN_NAME_MAP.put("父,母,姐,子", "表叔");
+        CHAIN_NAME_MAP.put("父,母,姐,女", "表姑");
+        CHAIN_NAME_MAP.put("父,母,妹,子", "表叔");
+        CHAIN_NAME_MAP.put("父,母,妹,女", "表姑");
     }
 
     /**
@@ -171,26 +207,31 @@ public class RelationInferenceUtil {
     public String resolveChain(List<String> chain) {
         if (chain == null || chain.isEmpty()) return "亲属";
 
-        // 同辈模式："同辈" 开头
+        // 兼容旧的"同辈"前缀模式
         if ("同辈".equals(chain.get(0))) {
             if (chain.size() < 3) return "亲属";
             String key = chain.get(1) + "," + chain.get(2);
             return SIBLING_NAME_MAP.getOrDefault(key, "亲属");
         }
 
-        // 配偶和同辈单步
+        // 单步：直接兄弟姐妹（新模式，哥/弟/姐/妹 作为第一个元素）
         if (chain.size() == 1) {
-            return CHAIN_NAME_MAP.getOrDefault(chain.get(0),
-                   switch(chain.get(0)) {
-                       case "哥" -> "哥哥"; case "弟" -> "弟弟";
-                       case "姐" -> "姐姐"; case "妹" -> "妹妹";
-                       default -> "亲属";
-                   });
+            String s = chain.get(0);
+            switch (s) {
+                case "哥": return "哥哥";
+                case "弟": return "弟弟";
+                case "姐": return "姐姐";
+                case "妹": return "妹妹";
+                default: return CHAIN_NAME_MAP.getOrDefault(s, "亲属");
+            }
         }
 
-        // 直系链
+        // 多步链（直接查表）
         String key = String.join(",", chain);
-        return CHAIN_NAME_MAP.getOrDefault(key, buildFallbackName(chain));
+        if (CHAIN_NAME_MAP.containsKey(key)) return CHAIN_NAME_MAP.get(key);
+
+        // 4步链查表（在 CHAIN_NAME_MAP 中已有 4步 key）
+        return buildFallbackName(chain);
     }
 
     /**
@@ -382,8 +423,8 @@ public class RelationInferenceUtil {
     public List<String> reverseChainWithGender(List<String> chain, Integer myGender, Integer otherGender) {
         if (chain == null || chain.isEmpty()) return new ArrayList<>();
 
-        // 配偶：对称
-        if ("配偶".equals(chain.get(0))) return new ArrayList<>(chain);
+        // 单步配偶才对称返回；多步配偶链（["配偶","父"]/["配偶","母"]等）走通用逆向
+        if (chain.size() == 1 && "配偶".equals(chain.get(0))) return new ArrayList<>(chain);
 
         // 同辈：逆向时用"我"(myGender)的性别确定称谓，用原链的长幼关系确定排行
         if ("同辈".equals(chain.get(0))) {
@@ -403,30 +444,50 @@ public class RelationInferenceUtil {
             return rev;
         }
 
-        // 直系链逆向
+        // 直系链逆向（核心规则：反转每一步的方向和性别）
         List<String> rev = new ArrayList<>();
         for (int i = 0; i < chain.size(); i++) {
             String s = chain.get(i);
             if (i == 0) {
-                // 第一步代表"我"与直接亲属的关系，用 myGender 修正
+                // 第一步：「我」与对方的直接关系，用 myGender 决定逆向称谓
                 switch (s) {
                     case "子": case "女":
-                        // 我说"TA是我的孩子" → 逆向："我是TA的父(男)/母(女)"
+                        // B是A的孩子 → 逆向：A是B的父(男)/母(女)
                         rev.add(0, myGender != null && myGender == 2 ? "母" : "父");
                         break;
                     case "父": case "母":
-                        // 我说"TA是我的父母" → 逆向："我是TA的子(男)/女(女)"
+                        // B是A的父母 → 逆向：A是B的子(男)/女(女)
                         rev.add(0, myGender != null && myGender == 2 ? "女" : "子");
+                        break;
+                    case "哥": case "姐":
+                        // B是A的兄/姐（B比A年长） → 逆向：A是B的弟(男)/妹(女)
+                        rev.add(0, myGender != null && myGender == 2 ? "妹" : "弟");
+                        break;
+                    case "弟": case "妹":
+                        // B是A的弟/妹（B比A年幼） → 逆向：A是B的哥(男)/姐(女)
+                        rev.add(0, myGender != null && myGender == 2 ? "姐" : "哥");
                         break;
                     default:
                         rev.add(0, s);
                 }
             } else {
-                // 中间步骤（不知道各人性别，用兜底值）
+                // 中间步骤：反转父子/祖孙方向；兄弟姐妹作为中间步骤保持原值
                 switch (s) {
-                    case "子": case "女": rev.add(0, "父"); break;
-                    case "父": case "母": rev.add(0, "子"); break;
-                    default: rev.add(0, s);
+                    case "子": case "女":
+                        rev.add(0, "父");  // 暂不细分父/母，由后续 gender 修正处理
+                        break;
+                    case "父": case "母":
+                        // 需要知道"孩子"的性别：
+                        // 若前一步是"配偶"，则孩子是 A 的配偶（与 A 异性）
+                        // A女→配偶男→子；A男→配偶女→女
+                        String prevStep = chain.get(i - 1);
+                        if ("配偶".equals(prevStep)) {
+                            rev.add(0, myGender != null && myGender == 2 ? "子" : "女");
+                        } else {
+                            rev.add(0, "子");  // 默认取子（最常见）
+                        }
+                        break;
+                    default: rev.add(0, s); // 哥/弟/姐/妹/配偶 原样保留
                 }
             }
         }
